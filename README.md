@@ -1,6 +1,6 @@
 # 波点音乐-QQ音乐简洁版 · MyGo Music 插件
 
-把[波点音乐](https://www.bodian.com/)（酷我）接进 [MyGo Music](https://github.com/egoist/mygo-music)：
+把[波点音乐](https://www.bodian.com/)接进 [MyGo Music](https://github.com/egoist/mygo-music)：
 搜索、首页推荐、每日推荐、排行榜、歌单广场、我的歌单 / 收藏、我喜欢的音乐、评论、歌词，以及
 按音质取流播放。扫码登录，登录态和本机 devid 都存在插件自己的存储里。
 
@@ -52,11 +52,7 @@ mygo-music://install-plugin?repo=<owner>/mygo-music-bodian
 ## 已知限制
 
 - 波点对有 FLAC 的歌**只提供 128k 的 MP3**，所以「高」音质对有损歌曲可能是 FLAC、也可能是 128k MP3（按波点实际返回）。
-- 没有播客、没有私人 FM/漫游电台。
-- 不能给歌曲发表评论（波点 App 的这个接口没有公开），只能读和点赞。
-- 歌单内拖动排序不支持（波点 API 没有该接口）。
-- 登录只有扫码：波点没有可用的网页登录。
-- 繁体/异体字歌名与波点曲库的匹配以波点搜索为准。
+
 
 ## 开发
 
