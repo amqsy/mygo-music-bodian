@@ -1,6 +1,6 @@
 // 波点音乐 (Bodian) for MyGo Music.
 //
-// Bodian is Kuwo's music app: its API answers JSON under bd-api.kuwo.cn,
+// Bodian's API answers JSON under bd-api.kuwo.cn,
 // with headers naming the app, and a session whose token is bound to this
 // install's device ID. The plugin keeps both in host.storage.
 
