@@ -29,6 +29,17 @@ function fail(code, message) {
   return error;
 }
 
+// t is what the app says in the listener's language: the plugin writes
+// English, and locales/zh-CN.json says it in Chinese.
+function t(text, values) {
+  let out = typeof host.t === "function" ? host.t(text) : text;
+  if (values) {
+    out = out.replace(/\{(\w+)\}/g, (whole, key) =>
+      Object.prototype.hasOwnProperty.call(values, key) ? String(values[key]) : whole);
+  }
+  return out;
+}
+
 // --- storage ---------------------------------------------------------------
 
 // devid is this install's device ID: Bodian trusts a device it has seen
@@ -56,7 +67,7 @@ function setSession(value) {
 
 async function requireSession() {
   const s = session();
-  if (!s) throw fail("signIn", "请先扫码登录波点音乐");
+  if (!s) throw fail("signIn", t("Sign in to Bodian Music first"));
   return s;
 }
 
@@ -113,20 +124,20 @@ async function request(path, { query, method = "GET", body, headers: extra } = {
     const response = await fetch(url, init);
     envelope = await response.json();
   } catch (error) {
-    if (controller.signal.aborted) throw new Error("波点音乐请求超时，请稍后重试");
-    throw new Error("无法读取波点音乐，请检查网络后重试");
+    if (controller.signal.aborted) throw new Error(t("Bodian Music timed out, please try again"));
+    throw new Error(t("Can’t reach Bodian Music, check your network"));
   } finally {
     clearTimeout(timer);
   }
-  if (!envelope || typeof envelope !== "object") throw new Error("波点音乐返回了无效数据");
+  if (!envelope || typeof envelope !== "object") throw new Error(t("Bodian Music returned invalid data"));
   const code = Number(envelope.code);
   if (code !== 200) {
     if (SIGNED_OUT.includes(code)) {
       setSession(null);
-      throw fail("signIn", "波点音乐登录已失效，请重新扫码登录");
+      throw fail("signIn", t("Your Bodian Music session expired, sign in again"));
     }
-    if (NO_STREAM.includes(code)) throw fail("unavailable", "波点音乐没有这首歌曲的播放权限");
-    throw new Error(`波点音乐接口返回错误（${Number.isFinite(code) ? code : "未知"}）`);
+    if (NO_STREAM.includes(code)) throw fail("unavailable", t("Bodian Music can’t play this song"));
+    throw new Error(t("Bodian Music answered with an error ({code})", { code: Number.isFinite(code) ? code : "?" }));
   }
   return envelope.data;
 }
@@ -145,19 +156,19 @@ const artistID = (raw) => `ar-${raw}`;
 
 function digits(value) {
   const text = String(value ?? "").trim();
-  if (!/^\d+$/.test(text) || Number(text) <= 0) throw fail("unavailable", "无效的波点音乐 ID");
+  if (!/^\d+$/.test(text) || Number(text) <= 0) throw fail("unavailable", t("Invalid Bodian Music ID"));
   return text;
 }
 
 function parsePrefixed(value, prefix) {
   const m = new RegExp(`^${prefix}-(\\d+)$`).exec(String(value ?? ""));
-  if (!m) throw fail("unavailable", "无效的波点音乐 ID");
+  if (!m) throw fail("unavailable", t("Invalid Bodian Music ID"));
   return m[1];
 }
 
 function parsePlaylistID(value) {
   const m = /^pl-(\d+)-(\d+)$/.exec(String(value ?? ""));
-  if (!m) throw fail("unavailable", "无效的波点音乐歌单");
+  if (!m) throw fail("unavailable", t("Invalid Bodian Music playlist"));
   return { source: Number(m[1]), raw: m[2] };
 }
 
@@ -226,7 +237,7 @@ function toChart(wire = {}) {
     id: bangID(wire.id),
     name: wire.name || "",
     imageUrl: wire.pic || "",
-    description: wire.pub ? `更新：${wire.pub}` : "",
+    description: wire.pub ? t("Updated {date}", { date: wire.pub }) : "",
     trackCount: Number(wire.total) || (Array.isArray(wire.musics) ? wire.musics.length : 0),
   };
 }
@@ -303,18 +314,18 @@ async function profileOf(uid) {
   const user = (data && data.userInfo) || data || {};
   return {
     id: String(user.id || uid),
-    name: user.nickname || user.name || "波点音乐用户",
+    name: user.nickname || user.name || t("Bodian Music listener"),
     imageUrl: user.headImg || user.avatar || "",
     page: "me",
   };
 }
 
 export async function signIn() {
-  host.signInPrompt({ text: "正在获取波点音乐登录二维码…" });
+  host.signInPrompt({ text: t("Getting the sign-in QR code…") });
   const { qrCode } = await get("ucenter/login/qrCode");
-  if (!qrCode) throw new Error("波点音乐没有返回登录二维码，请稍后重试");
+  if (!qrCode) throw new Error(t("Bodian Music did not return a sign-in QR code"));
   const content = `https://bodian-oia.kuwo.cn/bodian/download.html?pageName=login_pc&pt=3&id=${encodeURIComponent(qrCode)}`;
-  host.signInPrompt({ qr: content, text: "请用波点音乐 App 扫码，并在手机上确认登录" });
+  host.signInPrompt({ qr: content, text: t("Scan with the Bodian Music app and confirm on your phone") });
 
   const deadline = Date.now() + 180000;
   let confirmed = false;
@@ -326,27 +337,27 @@ export async function signIn() {
     } catch (error) {
       continue;
     }
-    if (Number(status) === 2) throw new Error("二维码已过期，请重新点击登录");
+    if (Number(status) === 2) throw new Error(t("The QR code expired, sign in again"));
     if (Number(status) === 3) {
       confirmed = true;
       break;
     }
   }
-  if (!confirmed) throw new Error("登录已取消或超时，请重新点击登录");
+  if (!confirmed) throw new Error(t("Sign-in was cancelled or timed out"));
 
   // The phone confirmed it; the session may take a moment to be issued.
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
       const data = await post("ucenter/users/login", { authType: 10, qrCode });
       const uid = data && (data.id || (data.userInfo && data.userInfo.id));
-      if (!data || !data.token || !uid) throw new Error("波点音乐没有返回登录信息，请重新扫码");
+      if (!data || !data.token || !uid) throw new Error(t("Bodian Music did not return a session"));
       setSession({ uid: String(uid), token: data.token });
       const profile = await profileOf(uid);
       if (data.userInfo) {
         profile.name = data.userInfo.nickname || profile.name;
         profile.imageUrl = data.userInfo.headImg || profile.imageUrl;
       }
-      host.signInPrompt({ text: "登录成功" });
+      host.signInPrompt({ text: t("Signed in") });
       return profile;
     } catch (error) {
       if (error && error.code === "unavailable") throw error;
@@ -354,7 +365,7 @@ export async function signIn() {
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
   }
-  throw new Error("登录失败，请重新扫码");
+  throw new Error(t("Sign-in failed, scan again"));
 }
 
 export function signOut() {
@@ -401,7 +412,7 @@ export async function search({ query, kind = "tracks", offset = 0 }) {
     const list = data.resultList || [];
     return { playlists: list.map(toPlaylist), more: list.length >= PAGE };
   }
-  throw fail("unsupported", "波点音乐没有这种搜索");
+  throw fail("unsupported", t("Bodian Music can’t search for that"));
 }
 
 export async function suggest({ query }) {
@@ -433,7 +444,11 @@ async function charts() {
   const groups = await get("service/home/bangNew");
   const out = [];
   for (const group of groups || []) {
-    for (const bang of group.bangList || []) out.push(toChart(bang));
+    for (const bang of group.bangList || []) {
+      // The H5 charts Bodian lists have no id, and open nothing.
+      if (!bang || !bang.id) continue;
+      out.push(toChart(bang));
+    }
   }
   return out;
 }
@@ -457,9 +472,9 @@ async function homeSections() {
 
   if (daily.length) {
     sections.push({
-      title: "每日推荐",
-      pageTitle: "每日推荐",
-      subtitle: "波点音乐每天为你挑选",
+      title: t("Daily Picks"),
+      pageTitle: t("Daily Picks"),
+      subtitle: t("Picked for you every day by Bodian Music"),
       tracks: daily,
       morePage: "daily",
     });
@@ -468,19 +483,19 @@ async function homeSections() {
   if (labMusic && labMusic.id) {
     const calendar = (lab.lab && lab.lab.calendar) || {};
     sections.push({
-      title: calendar.title ? `波点实验室 · ${calendar.title}` : "波点实验室",
+      title: calendar.title ? t("Bodian Lab · {title}", { title: calendar.title }) : t("Bodian Lab"),
       tracks: [toTrack(labMusic)],
     });
   }
   if (video && Array.isArray(video.video) && video.video.length) {
-    sections.push({ title: "听点不一样的", tracks: video.video.map(toTrack) });
+    sections.push({ title: t("Something Different"), tracks: video.video.map(toTrack) });
   }
   sections.push(...themes);
   if (featured.length) {
-    sections.push({ title: "推荐歌单", playlists: featured, morePage: "square" });
+    sections.push({ title: t("Recommended Playlists"), playlists: featured, morePage: "square" });
   }
   if (chartList.length) {
-    sections.push({ title: "排行榜", playlists: chartList.slice(0, 8), morePage: "charts" });
+    sections.push({ title: t("Charts"), playlists: chartList.slice(0, 8), morePage: "charts" });
   }
   return sections;
 }
@@ -506,7 +521,7 @@ async function themedSections() {
 }
 
 export async function home() {
-  return { title: "发现音乐", subtitle: "波点音乐 · 扫码登录后可读取你的歌单", sections: await homeSections() };
+  return { title: t("Discover"), subtitle: t("Bodian Music · sign in to see your playlists"), sections: await homeSections() };
 }
 
 const SQUARE_PAGE = 60;
@@ -519,36 +534,36 @@ async function squarePage(page) {
 
 export async function browse({ page }) {
   if (page === "daily") {
-    return { title: "每日推荐", subtitle: "波点音乐每天为你挑选", sections: [{ tracks: await dailySongs() }] };
+    return { title: t("Daily Picks"), subtitle: t("Picked for you every day by Bodian Music"), sections: [{ tracks: await dailySongs() }] };
   }
   if (page === "charts") {
-    return { title: "排行榜", sections: [{ playlists: await charts() }] };
+    return { title: t("Charts"), sections: [{ playlists: await charts() }] };
   }
   if (page === "square" || /^square-\d+$/.test(String(page))) {
     const wanted = page === "square" ? 1 : Number(String(page).slice("square-".length));
     const { playlists, total, pn } = await squarePage(wanted);
-    const sections = [{ title: "歌单广场", playlists }];
+    const sections = [{ title: t("Playlist Square"), playlists }];
     const shown = (pn - 1) * SQUARE_PAGE + playlists.length;
     const links = [];
-    if (shown < total) links.push({ title: "下一页", subtitle: `已看 ${shown} / ${total}`, page: `square-${pn + 1}` });
-    if (pn > 1) links.push({ title: "上一页", page: `square-${pn - 1}` });
-    if (links.length) sections.push({ title: "更多", links });
-    return { title: "歌单广场", subtitle: "波点音乐听众公开的歌单", sections };
+    if (shown < total) links.push({ title: t("Next Page"), subtitle: t("Shown {shown} of {total}", { shown, total }), page: `square-${pn + 1}` });
+    if (pn > 1) links.push({ title: t("Previous Page"), page: `square-${pn - 1}` });
+    if (links.length) sections.push({ title: t("More"), links });
+    return { title: t("Playlist Square"), subtitle: t("Playlists Bodian Music listeners shared"), sections };
   }
   if (page === "me") {
     const s = await requireSession();
     const [mine, saved] = await myPlaylists(s.uid);
     const profile = await profileOf(s.uid).catch(() => null);
     return {
-      title: profile ? profile.name : "我的波点音乐",
+      title: profile ? profile.name : t("My Bodian Music"),
       imageUrl: profile ? profile.imageUrl : "",
       sections: [
-        { title: "我的歌单", playlists: mine, empty: "还没有创建歌单" },
-        { title: "收藏的歌单", playlists: saved, empty: "还没有收藏歌单" },
+        { title: t("My Playlists"), playlists: mine, empty: t("No playlists yet") },
+        { title: t("Saved Playlists"), playlists: saved, empty: t("No saved playlists yet") },
       ],
     };
   }
-  throw fail("unsupported", "没有这个页面");
+  throw fail("unsupported", t("There’s no such page"));
 }
 
 // --- library ---------------------------------------------------------------
@@ -589,7 +604,7 @@ async function playlistSource(raw, source) {
     }
     if (info && info.id && info.name) return { info, source: st };
   }
-  throw fail("unavailable", "歌单不存在或当前账号无权访问");
+  throw fail("unavailable", t("This playlist is gone, or your account can’t see it"));
 }
 
 async function playlistTracks(raw, source) {
@@ -616,9 +631,9 @@ export async function playlist({ id }) {
     const data = await get(`service/bang/${raw}/musics`, { pn: 1, rn: PLAYLIST_LIMIT });
     return {
       id: bangID(raw),
-      name: data.name || "排行榜",
+      name: data.name || t("Charts"),
       imageUrl: data.pic || "",
-      description: data.pub ? `更新：${data.pub}` : "",
+      description: data.pub ? t("Updated {date}", { date: data.pub }) : "",
       trackCount: Number(data.total) || (data.musics || []).length,
       tracks: (data.musics || []).map(toTrack),
     };
@@ -636,17 +651,17 @@ export async function playlist({ id }) {
 
 export async function createPlaylist({ name }) {
   const title = String(name || "").trim();
-  if (!title) throw new Error("歌单名不能为空");
+  if (!title) throw new Error(t("A playlist needs a name"));
   await requireSession();
   const data = await post("service/playlist", { name: title, private: false });
   const raw = data && (data.id || data.playlistId);
-  if (!raw) throw new Error("波点音乐没有返回新歌单的 ID");
+  if (!raw) throw new Error(t("Bodian Music did not return the new playlist’s ID"));
   return { id: plID(SOURCE_OWN, raw), name: title, mine: true, trackCount: 0, tracks: [] };
 }
 
 export async function renamePlaylist({ id, name }) {
   const title = String(name || "").trim();
-  if (!title) throw new Error("歌单名不能为空");
+  if (!title) throw new Error(t("A playlist needs a name"));
   await requireSession();
   const { raw } = parsePlaylistID(id);
   const info = await get(`service/playlist/info/${raw}`, { source: SOURCE_OWN });
@@ -747,7 +762,7 @@ export async function isLiked({ ids }) {
 export async function like({ id, on }) {
   const s = await requireSession();
   const pid = await likedPlaylistID(s.uid);
-  if (!pid) throw new Error("波点音乐账号还没有「我喜欢」歌单");
+  if (!pid) throw new Error(t("This account has no Liked Songs playlist yet"));
   await post(on ? "service/playlist/music" : "service/playlist/music/delete", {
     playListId: Number(pid),
     musicIdList: [Number(digits(id))],
@@ -761,7 +776,7 @@ export async function album({ id }) {
   const raw = parsePrefixed(id, "al");
   const data = await get(`service/album/${raw}`);
   const info = data.albumInfo || {};
-  if (!info.id && !info.name) throw fail("unavailable", "专辑不可用");
+  if (!info.id && !info.name) throw fail("unavailable", t("This album isn’t available"));
   const songs = await get(`service/album/music/${raw}`, { pn: 1, rn: 1000 });
   return {
     album: toAlbum({ ...info, albumId: info.albumId || info.id }),
@@ -773,7 +788,7 @@ export async function artist({ id }) {
   const raw = parsePrefixed(id, "ar");
   const data = await get(`service/artist/${raw}`);
   const info = data.artistInfo || {};
-  if (!info.id && !info.name) throw fail("unavailable", "歌手不可用");
+  if (!info.id && !info.name) throw fail("unavailable", t("This artist isn’t available"));
   const [songs, albums, state] = await Promise.all([
     get(`service/artist/music/${raw}`, { pn: 1, rn: 50 }).catch(() => ({ resultList: [] })),
     get(`service/artist/album/${raw}`, { pn: 1, rn: 30 }).catch(() => ({ resultList: [] })),
@@ -876,7 +891,11 @@ const LEVELS = { standard: 1, high: 2, lossless: 3 };
 
 export async function stream({ id, quality = "high" }) {
   const raw = digits(id);
-  const asked = BITRATES[quality] ? quality : "high";
+  // The listener may pin a quality in the plugin's settings; otherwise the
+  // player's choice stands.
+  const pinned = host.setting("quality");
+  const chosen = BITRATES[pinned] ? pinned : quality;
+  const asked = BITRATES[chosen] ? chosen : "high";
   let best = null;
   for (const br of BITRATES[asked]) {
     let found;
@@ -892,7 +911,7 @@ export async function stream({ id, quality = "high" }) {
     }
     if (LEVELS[found.level] >= LEVELS[asked]) break;
   }
-  if (!best) throw fail("unavailable", "波点音乐没有这首歌曲的播放权限");
+  if (!best) throw fail("unavailable", t("Bodian Music can’t play this song"));
   return {
     url: best.url,
     type: best.type,

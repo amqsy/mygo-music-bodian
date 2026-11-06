@@ -1,6 +1,6 @@
 {
   "id": "bodian",
-  "name": "波点音乐",
+  "name": "Bodian Music",
   "version": "0.1.0",
   "minAppVersion": "0.1.16",
   "main": "index.js",
@@ -8,11 +8,18 @@
   "permissions": {
     "network": ["bd-api.kuwo.cn", "mlyric.kuwo.cn"]
   },
+  "settings": [
+    {
+      "key": "quality",
+      "label": "Quality Override",
+      "help": "standard, high or lossless. Leave empty to follow the player."
+    }
+  ],
   "navigation": [
-    { "title": "发现音乐", "builtin": "home" },
-    { "title": "每日推荐", "page": "daily", "icon": "calendar" },
-    { "title": "排行榜", "page": "charts", "icon": "chart" },
-    { "title": "歌单广场", "page": "square", "icon": "playlist" },
-    { "title": "我喜欢的音乐", "builtin": "liked" }
+    { "title": "Discover", "builtin": "home", "icon": "home" },
+    { "title": "Daily Picks", "page": "daily", "icon": "calendar" },
+    { "title": "Charts", "page": "charts", "icon": "chart" },
+    { "title": "Playlist Square", "page": "square", "icon": "playlist" },
+    { "title": "Liked Songs", "builtin": "liked", "icon": "heart" }
   ]
 }
