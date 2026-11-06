@@ -18,8 +18,10 @@
   "navigation": [
     { "title": "Discover", "builtin": "home", "icon": "home" },
     { "title": "Daily Picks", "page": "daily", "icon": "calendar" },
+    { "title": "Radio", "builtin": "stations", "icon": "radio" },
     { "title": "Charts", "page": "charts", "icon": "chart" },
     { "title": "Playlist Square", "page": "square", "icon": "playlist" },
+    { "title": "Fresh Finds", "page": "fresh", "icon": "star" },
     { "title": "Liked Songs", "builtin": "liked", "icon": "heart" }
   ]
 }

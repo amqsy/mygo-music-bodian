@@ -459,14 +459,128 @@ async function featuredPlaylists(limit = 30) {
   return limit > 0 ? list.slice(0, limit) : list;
 }
 
+// --- radio -----------------------------------------------------------------
+
+// The scenes the radio hub offers. Its own list is the truth; these are the
+// ones it always had, for when it answers with nothing (signed out, or away).
+function sceneFallback() {
+  return [
+    { id: 110, name: t("Driving") },
+    { id: 111, name: t("Workout") },
+    { id: 112, name: t("Study") },
+    { id: 114, name: t("Sleep") },
+  ];
+}
+
+async function scenes() {
+  try {
+    const data = await get("service/radio/scene_radio");
+    const list = (data.result || []).filter((scene) => scene && scene.id);
+    if (list.length) return list;
+  } catch (error) {
+    // Signed out, or the hub is away: carry on with the scenes it always had.
+  }
+  return sceneFallback();
+}
+
+// A station is endless here, so each one remembers how far it has read and
+// what it has already played.
+const stationAt = new Map();
+const stationPlayed = new Map();
+
+export async function stations() {
+  const out = [
+    {
+      id: "guess",
+      name: t("Guess You Like"),
+      description: t("Bodian Music picks, one after another"),
+    },
+  ];
+  for (const scene of await scenes()) {
+    out.push({
+      id: `scene-${scene.id}`,
+      name: scene.name || "",
+      description: t("Scene radio · {name}", { name: scene.name || "" }),
+      imageUrl: scene.pic || "",
+    });
+  }
+  return out;
+}
+
+export async function stationNext({ id }) {
+  const key = String(id || "");
+  const scene = /^scene-(\d+)$/.exec(key);
+  if (key !== "guess" && !scene) throw fail("unavailable", t("Invalid Bodian Music station"));
+
+  const seen = stationPlayed.get(key) || new Set();
+  const page = stationAt.get(key) || 0;
+  // A page may hold songs the station already played; the listener asked for
+  // more, so read on until there is something new.
+  for (let tries = 1; tries <= 3; tries += 1) {
+    const next = page + tries;
+    const data = key === "guess"
+      ? await get("service/music/recommendList", { pn: next, rn: 30, select_card: 1 })
+      : await get(`service/category/${scene[1]}/musics`, { pn: next, rn: PAGE });
+    const tracks = (data.musicList || []).map(toTrack).filter((track) => track.id && !seen.has(track.id));
+    if (tracks.length) {
+      stationAt.set(key, next);
+      for (const track of tracks) seen.add(track.id);
+      stationPlayed.set(key, seen);
+      return tracks;
+    }
+  }
+  stationAt.set(key, page + 3);
+  stationPlayed.set(key, seen);
+  return [];
+}
+
+// guessTracks is 猜你想听: a recommendation stream that answers a few songs at
+// a time, so a handful of pages make a section.
+async function guessTracks(count = 20) {
+  const batches = await Promise.all([1, 2, 3].map((pn) =>
+    get("service/music/recommendList", { pn, rn: 30, select_card: 1 })
+      .then((data) => data.musicList || [])
+      .catch(() => [])));
+  const out = [];
+  const seen = new Set();
+  for (const wire of batches.flat()) {
+    const track = toTrack(wire);
+    if (!track.id || seen.has(track.id)) continue;
+    seen.add(track.id);
+    out.push(track);
+    if (out.length >= count) break;
+  }
+  return out;
+}
+
+// freshGroups is 新鲜探索: playlists in labelled groups.
+async function freshGroups() {
+  const data = await get("service/finds/playlist");
+  return (data.lists || []).filter((group) => Array.isArray(group.playLists) && group.playLists.length);
+}
+
+async function freshPlaylists(limit = 24) {
+  const out = [];
+  for (const group of await freshGroups()) {
+    for (const wire of group.playLists) {
+      out.push(toPlaylist(wire));
+      if (out.length >= limit) return out;
+    }
+  }
+  return out;
+}
+
 async function homeSections() {
   const sections = [];
-  const [daily, lab, video, themes, featured, chartList] = await Promise.all([
+  const [daily, guess, lab, video, themes, similar, featured, fresh, chartList] = await Promise.all([
     dailySongs().catch(() => []),
+    guessTracks(10).catch(() => []),
     module(4).catch(() => null),
     module(11).catch(() => null),
     themedSections().catch(() => []),
+    session() ? module(10).catch(() => null) : null,
     featuredPlaylists(24).catch(() => []),
+    freshPlaylists(12).catch(() => []),
     charts().catch(() => []),
   ]);
 
@@ -477,6 +591,13 @@ async function homeSections() {
       subtitle: t("Picked for you every day by Bodian Music"),
       tracks: daily,
       morePage: "daily",
+    });
+  }
+  if (guess.length) {
+    sections.push({
+      title: t("Guess You Like"),
+      subtitle: t("Bodian Music picks, one after another"),
+      tracks: guess,
     });
   }
   const labMusic = lab && lab.lab && lab.lab.music;
@@ -491,8 +612,18 @@ async function homeSections() {
     sections.push({ title: t("Something Different"), tracks: video.video.map(toTrack) });
   }
   sections.push(...themes);
+  const similarTracks = similar && Array.isArray(similar.musicList) ? similar.musicList.map(toTrack) : [];
+  if (similarTracks.length) {
+    sections.push({
+      title: similar.moduleName || t("More Like What You Liked"),
+      tracks: similarTracks,
+    });
+  }
   if (featured.length) {
     sections.push({ title: t("Recommended Playlists"), playlists: featured, morePage: "square" });
+  }
+  if (fresh.length) {
+    sections.push({ title: t("Fresh Finds"), playlists: fresh, morePage: "fresh" });
   }
   if (chartList.length) {
     sections.push({ title: t("Charts"), playlists: chartList.slice(0, 8), morePage: "charts" });
@@ -549,6 +680,18 @@ export async function browse({ page }) {
     if (pn > 1) links.push({ title: t("Previous Page"), page: `square-${pn - 1}` });
     if (links.length) sections.push({ title: t("More"), links });
     return { title: t("Playlist Square"), subtitle: t("Playlists Bodian Music listeners shared"), sections };
+  }
+  if (page === "fresh") {
+    const groups = await freshGroups();
+    const sections = groups.map((group) => ({
+      title: group.title || t("Fresh Finds"),
+      playlists: group.playLists.map(toPlaylist),
+    }));
+    return {
+      title: t("Fresh Finds"),
+      subtitle: t("Playlists Bodian Music picked for you"),
+      sections,
+    };
   }
   if (page === "me") {
     const s = await requireSession();
