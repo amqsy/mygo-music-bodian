@@ -1,4 +1,4 @@
-# Bodian Music · MyGo Music 插件
+# 波点音乐-QQ音乐简洁版 · MyGo Music 插件
 
 把[波点音乐](https://www.bodian.com/)（酷我）接进 [MyGo Music](https://github.com/egoist/mygo-music)：
 搜索、首页推荐、每日推荐、排行榜、歌单广场、我的歌单 / 收藏、我喜欢的音乐、评论、歌词，以及
