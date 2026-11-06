@@ -13,7 +13,7 @@
   - Windows：`%APPDATA%\MyGo Music\plugins\bodian`
   - macOS：`~/Library/Application Support/MyGo Music/plugins/bodian`
 
-装好后在侧栏左上角的来源切换里选「波点音乐」。
+装好后在侧栏左上角的来源切换里选「波点音乐-QQ音乐简洁版」。
 
 从 GitHub 安装时，仓库加上 topic `mygo-music-plugin` 就会出现在
 [官方插件列表](https://music.egoist.dev/zh/plugins)：
@@ -67,7 +67,3 @@ npm run check  # 语法检查 + 测试
 测试覆盖：搜索/歌单/评论/歌词的字段映射、会话进 query 与过期处理、歌单源探测、
 取流阶梯（FLAC / 320k / 128k / 加密格式跳过）、改名 PUT、删除 DELETE、扫码登录流程、
 音质覆盖，以及「每一条界面文案都有中文翻译」。
-
-## 许可
-
-MIT。波点音乐的内容版权归其权利人所有。
