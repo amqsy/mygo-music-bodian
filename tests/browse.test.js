@@ -319,7 +319,8 @@ test("an empty calendar page has nothing to page to", async () => {
     handler: api({ "service/musicCalendar/list/history": ok({ list: [] }) }),
   });
   const page = await mod.browse({ page: "calendar-3" });
-  assert.equal(page.sections[0].empty, "No calendar entries yet");
+  // Past the first page the calendar is not empty, so it doesn't say so.
+  assert.equal(page.sections[0].empty, "");
   const more = page.sections.find((section) => section.title === "More");
   assert.ok(more.links.some((link) => link.page === "calendar-2"), "the way back is kept");
 });

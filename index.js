@@ -802,8 +802,9 @@ async function topicPage(page) {
 // shows the story; its source id is the song's.
 const CALENDAR_STORIES = "calendarStories";
 // The host keeps a page of cards after the plugin has stopped holding it, so
-// the stories read are kept for the next run too.
-const CALENDAR_STORY_LIMIT = 1000;
+// the stories read are kept for the next run too. The calendar grows a day at
+// a time; this holds years of it, and storage grows by a few bytes a day.
+const CALENDAR_STORY_LIMIT = 2000;
 let calendarStories = null;
 let storiesDirty = false;
 
@@ -944,7 +945,7 @@ export async function browse({ page }) {
   if (page === "calendar" || /^calendar-\d+$/.test(String(page))) {
     const wanted = page === "calendar" ? 1 : Number(String(page).slice("calendar-".length));
     const { playlists, pn, more } = await calendarPage(wanted);
-    const sections = [{ playlists, empty: t("No calendar entries yet") }];
+    const sections = [{ playlists, empty: pn > 1 ? "" : t("No calendar entries yet") }];
     const links = [];
     // The calendar answers no total, so a full page is what says there may be
     // another one behind it.
