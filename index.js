@@ -661,7 +661,7 @@ export async function home() {
 }
 
 const SQUARE_PAGE = 60;
-const TOPIC_PAGE = 20;
+const TOPIC_PAGE = 100;
 
 // Bodian's category tree: six groups, each with the leaf ids its playlists
 // are filed under. Only the leaves filter; a group's own id answers nothing.
