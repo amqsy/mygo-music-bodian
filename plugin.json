@@ -1,7 +1,7 @@
 {
   "id": "bodian",
   "name": "Bodian Music",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "minAppVersion": "0.1.16",
   "main": "index.js",
   "playback": "stream",
