@@ -558,26 +558,9 @@ async function guessTracks(count = 20) {
   return out;
 }
 
-// freshGroups is 新鲜探索: playlists in labelled groups.
-async function freshGroups() {
-  const data = await get("service/finds/playlist");
-  return (data.lists || []).filter((group) => Array.isArray(group.playLists) && group.playLists.length);
-}
-
-async function freshPlaylists(limit = 24) {
-  const out = [];
-  for (const group of await freshGroups()) {
-    for (const wire of group.playLists) {
-      out.push(toPlaylist(wire));
-      if (out.length >= limit) return out;
-    }
-  }
-  return out;
-}
-
 async function homeSections() {
   const sections = [];
-  const [daily, guess, lab, video, themes, similar, featured, fresh, chartList] = await Promise.all([
+  const [daily, guess, lab, video, themes, similar, featured, chartList] = await Promise.all([
     dailySongs().catch(() => []),
     guessTracks(10).catch(() => []),
     module(4).catch(() => null),
@@ -585,7 +568,6 @@ async function homeSections() {
     themedSections().catch(() => []),
     session() ? module(10).catch(() => null) : null,
     featuredPlaylists(24).catch(() => []),
-    freshPlaylists(12).catch(() => []),
     charts().catch(() => []),
   ]);
 
@@ -626,9 +608,6 @@ async function homeSections() {
   }
   if (featured.length) {
     sections.push({ title: t("Recommended Playlists"), playlists: featured, morePage: "square" });
-  }
-  if (fresh.length) {
-    sections.push({ title: t("Fresh Finds"), playlists: fresh, morePage: "fresh" });
   }
   if (chartList.length) {
     sections.push({ title: t("Charts"), playlists: chartList.slice(0, 8), morePage: "charts" });
@@ -769,18 +748,6 @@ export async function browse({ page }) {
     if (pn > 1) links.push({ title: t("Previous Page"), page: `topics-${pn - 1}` });
     if (links.length) sections.push({ title: t("More"), links });
     return { title: t("Topics"), subtitle: t("Bodian Music listeners’ topics"), sections };
-  }
-  if (page === "fresh") {
-    const groups = await freshGroups();
-    const sections = groups.map((group) => ({
-      title: group.title || t("Fresh Finds"),
-      playlists: group.playLists.map(toPlaylist),
-    }));
-    return {
-      title: t("Fresh Finds"),
-      subtitle: t("Playlists Bodian Music picked for you"),
-      sections,
-    };
   }
   if (page === "me") {
     const s = await requireSession();

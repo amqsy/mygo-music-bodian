@@ -10,19 +10,6 @@ const scenes = {
   ],
 };
 
-const playlist = (over = {}) => ({
-  id: 3684804146,
-  name: "自驾兜风",
-  pic: "http://img.example/pl.jpg",
-  creatorId: 224574739,
-  creatorName: "kw8678879831",
-  description: "假日自驾",
-  musicCount: 21,
-  playNum: 40529,
-  sourceType: 4,
-  ...over,
-});
-
 test("stations list the guess stream and the radio hub's scenes", async () => {
   const { mod } = await loadPlugin({
     handler: api({ "service/radio/scene_radio": ok(scenes) }),
@@ -93,41 +80,15 @@ test("a station that is not one of ours is unavailable", async () => {
   );
 });
 
-test("fresh finds keeps the hub's groups and their titles", async () => {
-  const { mod } = await loadPlugin({
-    handler: api({
-      "service/finds/playlist": ok({
-        lists: [
-          { title: "古风", total: 1, playLists: [playlist({ id: 1, name: "古风戏腔" })] },
-          { title: "摇滚", total: 1, playLists: [playlist({ id: 2, name: "摇滚现场" })] },
-          { title: "空组", playLists: [] },
-        ],
-      }),
-    }),
-  });
-  const page = await mod.browse({ page: "fresh" });
-  assert.equal(page.title, "Fresh Finds");
-  assert.deepEqual(page.sections.map((section) => section.title), ["古风", "摇滚"]);
-  assert.equal(page.sections[0].playlists[0].name, "古风戏腔");
-  assert.equal(page.sections[0].playlists[0].trackCount, 21);
-});
-
-test("home carries guess you like and fresh finds", async () => {
+test("home carries guess you like", async () => {
   const { mod } = await loadPlugin({
     handler: api({
       "service/music/recommendList": ok({ musicList: [track({ id: 1 }), track({ id: 2 })] }),
-      "service/finds/playlist": ok({
-        lists: [{ title: "古风", playLists: [playlist({ id: 1 })] }],
-      }),
     }),
   });
   const page = await mod.home();
   const titles = page.sections.map((section) => section.title);
   assert.ok(titles.includes("Guess You Like"), titles.join(","));
-  assert.ok(titles.includes("Fresh Finds"), titles.join(","));
   const guess = page.sections.find((section) => section.title === "Guess You Like");
   assert.equal(guess.tracks.length, 2);
-  const fresh = page.sections.find((section) => section.title === "Fresh Finds");
-  assert.equal(fresh.playlists.length, 1);
-  assert.equal(fresh.morePage, "fresh");
 });

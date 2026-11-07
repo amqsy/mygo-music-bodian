@@ -21,7 +21,6 @@
     { "title": "Radio", "builtin": "stations", "icon": "radio" },
     { "title": "Charts", "page": "charts", "icon": "chart" },
     { "title": "Playlist Square", "page": "square", "icon": "playlist" },
-    { "title": "Fresh Finds", "page": "fresh", "icon": "star" },
     { "title": "Topics", "page": "topics", "icon": "podcast" },
     { "title": "Liked Songs", "builtin": "liked", "icon": "heart" }
   ]
