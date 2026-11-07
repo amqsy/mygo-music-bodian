@@ -434,6 +434,28 @@ test("the manifest's name, pages and settings are translated", async () => {
   assert.deepEqual(missing, []);
 });
 
+test("each sidebar entry has its own icon", async () => {
+  const manifest = JSON.parse(await readFile(new URL("../plugin.json", import.meta.url), "utf8"));
+  const icons = (manifest.navigation || []).map((item) => item.icon).filter(Boolean);
+  assert.equal(new Set(icons).size, icons.length, icons.join(","));
+});
+
+test("the home lab row is named for the lab, not the calendar story", async () => {
+  const { mod } = await loadPlugin({
+    handler: api({
+      "service/home/module": (url) =>
+        url.searchParams.get("moduleId") === "4"
+          ? ok({ lab: { calendar: { title: "今日故事" }, music: track({ id: 7, name: "实验室的歌" }) } })
+          : ok({}),
+    }),
+  });
+  const page = await mod.home();
+  const lab = page.sections.find((section) => section.title === "Bodian Lab");
+  assert.ok(lab, page.sections.map((section) => section.title).join(","));
+  assert.equal(lab.tracks[0].name, "实验室的歌");
+  assert.ok(!page.sections.some((section) => section.title.includes("今日故事")));
+});
+
 test("a topic falls back to its clips when the playlist's songs don't load", async () => {
   const { mod } = await loadPlugin({
     handler: api({
