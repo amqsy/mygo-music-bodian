@@ -256,6 +256,40 @@ test("a calendar story is kept for the next run", async () => {
   assert.equal(opened.imageUrl, "http://img.example/story.jpg");
 });
 
+test("a calendar story opens as a small playlist around its song", async () => {
+  const days = [{
+    id: 717,
+    title: "隔着多远，都还想见一面",
+    pic: "http://img.example/story.jpg",
+    tag: "音乐经典时刻",
+    showDate: "2026-11-06",
+    sourceType: 2,
+    source: 6307329,
+  }];
+  const { mod, calls } = await loadPlugin({
+    handler: api({
+      "service/musicCalendar/list/history": ok({ list: days }),
+      "service/music/info": ok(track({ id: 6307329, name: "多远都要在一起" })),
+      "rec/music/similar/list": ok({
+        musicList: [
+          track({ id: 111, name: "相似一" }),
+          track({ id: 6307329, name: "自己" }),
+          track({ id: 112, name: "相似二" }),
+        ],
+      }),
+    }),
+  });
+  const page = await mod.browse({ page: "calendar" });
+  const opened = await mod.playlist({ id: page.sections[0].playlists[0].id });
+  assert.equal(opened.name, "隔着多远，都还想见一面");
+  assert.deepEqual(opened.tracks.map((song) => song.id), ["6307329", "111", "112"],
+    "the story's song first, then the songs around it, never twice");
+  assert.equal(opened.trackCount, 3);
+  const asked = calls.filter((call) => call.url.pathname.endsWith("/rec/music/similar/list"));
+  assert.equal(asked.length, 6, "three tastes, two pages each");
+  assert.ok(asked.every((call) => call.url.searchParams.get("musicId") === "6307329"));
+});
+
 test("a calendar song opened without its card still has a name", async () => {
   const { mod, calls } = await loadPlugin({
     handler: api({ "service/music/info": ok(track({ id: 6307329, name: "多远都要在一起" })) }),
@@ -288,60 +322,6 @@ test("an empty calendar says so", async () => {
   const page = await mod.browse({ page: "calendar" });
   assert.equal(page.sections[0].empty, "No calendar entries yet");
   assert.ok(!page.sections.some((section) => section.title === "More"));
-});
-
-test("the artists page shows the artists Bodian picked", async () => {
-  const { mod, calls } = await loadPlugin({
-    handler: api({
-      "service/finds/module": ok({
-        moduleName: "歌手",
-        artistList: [
-          { id: 5371, name: "G.E.M.邓紫棋", pic: "http://img.example/a.jpg", firstLine: "Ta最近很火" },
-          { id: 336, name: "周杰伦", pic: "" },
-          { id: 5372 },
-          { id: 0, name: "没有 id 的歌手" },
-        ],
-      }),
-    }),
-  });
-  const page = await mod.browse({ page: "artists" });
-  assert.equal(page.title, "Artists");
-  const asked = calls[0].url.searchParams;
-  assert.equal(asked.get("moduleId"), "54");
-  assert.equal(asked.get("categoryId"), "1");
-  const artists = page.sections[0].artists;
-  assert.deepEqual(artists.map((artist) => artist.id), ["ar-5371", "ar-336"]);
-  assert.equal(artists[0].name, "G.E.M.邓紫棋");
-  assert.equal(artists[0].imageUrl, "http://img.example/a.jpg");
-});
-
-test("the artists page also lists what their listeners listen to", async () => {
-  const { mod } = await loadPlugin({
-    handler: api({
-      "service/finds/module": ok({
-        artistList: [{ id: 1, name: "甲" }, { id: 2, name: "乙" }],
-      }),
-      "service/artist/similar/1": ok({
-        resultList: [{ id: 3, name: "丙" }, { id: 2, name: "乙" }, { id: 0 }],
-      }),
-      "service/artist/similar/2": ok({
-        resultList: [{ id: 3, name: "丙" }, { id: 4, name: "丁" }, { id: 5 }],
-      }),
-    }),
-  });
-  const page = await mod.browse({ page: "artists" });
-  assert.deepEqual(page.sections[0].artists.map((artist) => artist.id), ["ar-1", "ar-2"]);
-  const similar = page.sections.find((section) => section.title === "Artists You May Like");
-  assert.deepEqual(similar.artists.map((artist) => artist.id), ["ar-3", "ar-4"],
-    "no pick is repeated, no artist twice");
-});
-
-test("an empty artists page says so", async () => {
-  const { mod } = await loadPlugin({
-    handler: api({ "service/finds/module": ok({ artistList: [] }) }),
-  });
-  const page = await mod.browse({ page: "artists" });
-  assert.equal(page.sections[0].empty, "No artists to show yet");
 });
 
 test("an empty calendar page has nothing to page to", async () => {

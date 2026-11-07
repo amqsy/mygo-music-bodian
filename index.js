@@ -878,6 +878,30 @@ function calendarLine(track) {
   return artist ? `${track.name} · ${artist}` : track.name || "";
 }
 
+// What listeners of the story's song hear next. The story page is a small
+// playlist around it rather than a page that holds a single song.
+async function calendarRelated(song, until) {
+  const seen = new Set([String(song)]);
+  const out = [];
+  // Every answer is a taste of what goes with the song; the lists overlap,
+  // so a few pages of them make a fuller set than one.
+  const wants = [];
+  for (const type of [0, 1, 2]) for (const pn of [1, 2]) wants.push({ type, pn });
+  const lists = await Promise.all(wants.map(({ type, pn }) =>
+    get("rec/music/similar/list", { musicId: song, pn, rn: 20, type }, { deadline: until })
+      .catch(() => ({ musicList: [] }))));
+  for (const data of lists) {
+    for (const wire of data.musicList || []) {
+      const track = toTrack(wire);
+      if (!track.id || seen.has(track.id)) continue;
+      seen.add(track.id);
+      out.push(track);
+    }
+    if (out.length >= 18) break;
+  }
+  return out.slice(0, 18);
+}
+
 async function calendarPage(page) {
   const pn = Math.max(1, Number(page) || 1);
   const until = deadline();
@@ -896,34 +920,6 @@ async function calendarPage(page) {
     }
   }));
   return { playlists, pn, more: list.length >= CALENDAR_PAGE };
-}
-
-// 歌手: the artists Bodian picks for its discovery page.
-async function pickedArtists(until) {
-  const data = await get("service/finds/module", { moduleId: 54, categoryId: 1 }, { deadline: until });
-  return (data.artistList || [])
-    .filter((wire) => wire && wire.id && wire.name)
-    .map(toArtist);
-}
-
-// What listeners of the picks also listen to: enough artists to fill a page
-// where the ten picks alone leave it looking bare.
-async function similarPicks(picks, until) {
-  const seen = new Set(picks.map((artist) => artist.id));
-  const lists = await Promise.all(picks.map((artist) =>
-    get(`service/artist/similar/${String(artist.id).replace(/^ar-/, "")}`, undefined, { deadline: until })
-      .catch(() => ({ resultList: [] }))));
-  const out = [];
-  for (const data of lists) {
-    for (const wire of data.resultList || []) {
-      if (!wire || !wire.id || !wire.name) continue;
-      const artist = toArtist(wire);
-      if (seen.has(artist.id)) continue;
-      seen.add(artist.id);
-      out.push(artist);
-    }
-  }
-  return out;
 }
 
 async function squarePage(page) {
@@ -1004,18 +1000,6 @@ export async function browse({ page }) {
     if (pn > 1) links.push({ title: t("Previous Page"), page: `calendar-${pn - 1}` });
     if (links.length) sections.push({ title: t("More"), links });
     return { title: t("Music Calendar"), subtitle: t("A song and a story for every day"), sections };
-  }
-  if (page === "artists") {
-    const until = deadline();
-    const picks = await pickedArtists(until);
-    const similar = await similarPicks(picks, until);
-    const sections = [{ artists: picks, empty: t("No artists to show yet") }];
-    if (similar.length) sections.push({ title: t("Artists You May Like"), artists: similar });
-    return {
-      title: t("Artists"),
-      subtitle: t("Bodian Music’s picks for you"),
-      sections,
-    };
   }
   if (page === "me") {
     const s = await requireSession();
@@ -1142,6 +1126,7 @@ export async function playlist({ id }) {
   if (/^cal-\d+-\d+$/.test(String(id))) {
     const [, entry, song] = /^cal-(\d+)-(\d+)$/.exec(String(id));
     const track = await calendarSong(song, until);
+    const related = await calendarRelated(song, until);
     const story = calendarStoriesOf()[calendarID(entry, song)];
     return {
       id: calendarID(entry, song),
@@ -1150,8 +1135,8 @@ export async function playlist({ id }) {
       name: (story && story.name) || track.name || t("Music Calendar"),
       imageUrl: (story && story.imageUrl) || track.album.imageUrl || "",
       description: story ? story.description : "",
-      trackCount: 1,
-      tracks: [track],
+      trackCount: 1 + related.length,
+      tracks: [track, ...related],
       // A calendar entry is a page, not a playlist the listener can collect.
       mine: true,
     };

@@ -1,7 +1,7 @@
 {
   "id": "bodian",
   "name": "Bodian Music",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "minAppVersion": "0.1.17",
   "main": "index.js",
   "playback": "stream",
@@ -23,7 +23,6 @@
     { "title": "Charts", "page": "charts", "icon": "chart" },
     { "title": "Playlist Square", "page": "square", "icon": "playlist" },
     { "title": "Topics", "page": "topics", "icon": "podcast" },
-    { "title": "Artists", "page": "artists", "icon": "artist" },
     { "title": "Liked Songs", "builtin": "liked", "icon": "heart" }
   ]
 }
