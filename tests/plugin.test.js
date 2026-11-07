@@ -236,3 +236,17 @@ test("every string the plugin says has a Chinese translation", async () => {
   const missing = [...new Set(keys)].filter((key) => !(key in locales));
   assert.deepEqual(missing, [], `missing translations: ${missing.join(", ")}`);
 });
+
+test("typing gets suggestions, an empty box gets hot words", async () => {
+  const { mod, calls } = await loadPlugin({
+    handler: api({
+      "search/tip/v2/list": ok({
+        resultList: [{ relword: "晴天" }, { relword: "晴天 周杰伦" }, { relword: "" }],
+      }),
+      "search/hot/list": ok({ resultList: [{ key: "热歌" }, { key: "新歌" }] }),
+    }),
+  });
+  assert.deepEqual(await mod.suggest({ query: "晴" }), ["晴天", "晴天 周杰伦"]);
+  assert.equal(calls[0].url.searchParams.get("keyword"), "晴");
+  assert.deepEqual(await mod.suggest({ query: "  " }), ["热歌", "新歌"]);
+});

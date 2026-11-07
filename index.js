@@ -417,8 +417,13 @@ export async function search({ query, kind = "tracks", offset = 0 }) {
 
 export async function suggest({ query }) {
   const text = String(query || "").trim();
-  if (text) return [];
+  // What listeners type is answered with what they are about to type; an
+  // empty box gets Bodian's hot words instead.
   try {
+    if (text) {
+      const data = await get("search/tip/v2/list", { keyword: text });
+      return (data.resultList || []).map((w) => w.relword).filter(Boolean).slice(0, 10);
+    }
     const data = await get("search/hot/list");
     return (data.resultList || []).map((w) => w.key).filter(Boolean).slice(0, 10);
   } catch (error) {
