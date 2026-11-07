@@ -35,6 +35,18 @@ export async function loadPlugin({ storage = {}, settings = {}, handler, locales
     const call = { url, method: (init.method || "GET").toUpperCase(), headers: init.headers || {}, body: init.body };
     calls.push(call);
     const answer = await handler(url, init, call);
+    // A handler says __response when it means to answer as the web does, with
+    // a status and a body that needn't be JSON.
+    if (answer && answer.__response) {
+      const { status = 200, body = "" } = answer.__response;
+      return {
+        ok: status >= 200 && status < 300,
+        status,
+        json: async () => JSON.parse(body),
+        text: async () => body,
+        headers: { getSetCookie: () => [] },
+      };
+    }
     return {
       ok: true,
       status: 200,

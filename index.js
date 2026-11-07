@@ -9,6 +9,9 @@ const LYRIC = "https://mlyric.kuwo.cn/mobi.s";
 const UA = "Dart/3.3 (dart:io)";
 const PAGE = 30;
 const PLAYLIST_LIMIT = 1000;
+const REQUEST_TIMEOUT = 8000;
+// The host gives a call 30 seconds; stop short of it so the answer is ours.
+const CALL_BUDGET = 25000;
 const SESSION_KEY = "session";
 const DEVID_KEY = "devid";
 
@@ -27,6 +30,26 @@ function fail(code, message) {
   const error = new Error(message || code);
   error.code = code;
   return error;
+}
+
+// deadline is when a whole export has to answer, before the host's own 30s.
+function deadline() {
+  return Date.now() + CALL_BUDGET;
+}
+
+function expired(until) {
+  return !!until && Date.now() >= until;
+}
+
+function timedOut() {
+  return new Error(t("Bodian Music timed out, please try again"));
+}
+
+// safeURL keeps a remote address from naming anything but the web: the app
+// would read a file:// URL it was given as a cover or a stream.
+function safeURL(value) {
+  const url = String(value || "");
+  return /^https?:\/\//i.test(url) ? url : "";
 }
 
 // t is what the app says in the listener's language: the plugin writes
@@ -95,7 +118,8 @@ function headers(extra) {
   return h;
 }
 
-async function request(path, { query, method = "GET", body, headers: extra } = {}) {
+async function request(path, { query, method = "GET", body, headers: extra, deadline: until } = {}) {
+  if (expired(until)) throw timedOut();
   let url = API + path;
   const q = new URLSearchParams();
   for (const [k, v] of Object.entries(query || {})) {
@@ -117,14 +141,33 @@ async function request(path, { query, method = "GET", body, headers: extra } = {
     init.headers["Content-Type"] = "application/json";
   }
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 15000);
+  const wait = until ? Math.min(REQUEST_TIMEOUT, until - Date.now()) : REQUEST_TIMEOUT;
+  const timer = setTimeout(() => controller.abort(), Math.max(1, wait));
   init.signal = controller.signal;
   let envelope;
   try {
     const response = await fetch(url, init);
-    envelope = await response.json();
+    if (!response.ok) {
+      // The API answers its own errors in JSON with a 200, so a status here
+      // is the web's, not Bodian's. Keep whichever code says more.
+      let code = response.status;
+      try {
+        const answer = await response.json();
+        if (answer && answer.code !== undefined && Number(answer.code) !== 200) code = answer.code;
+      } catch (ignored) {
+        // Not JSON: the status is all there is.
+      }
+      throw fail("http", t("Bodian Music answered with an error ({code})", { code }));
+    }
+    try {
+      envelope = await response.json();
+    } catch (error) {
+      if (controller.signal.aborted) throw error;
+      throw fail("invalid", t("Bodian Music returned invalid data"));
+    }
   } catch (error) {
-    if (controller.signal.aborted) throw new Error(t("Bodian Music timed out, please try again"));
+    if (controller.signal.aborted) throw timedOut();
+    if (error && (error.code === "http" || error.code === "invalid")) throw error;
     throw new Error(t("Can’t reach Bodian Music, check your network"));
   } finally {
     clearTimeout(timer);
@@ -133,11 +176,19 @@ async function request(path, { query, method = "GET", body, headers: extra } = {
   const code = Number(envelope.code);
   if (code !== 200) {
     if (SIGNED_OUT.includes(code)) {
-      setSession(null);
+      // Only the session the request went out with may be cleared: one
+      // answered late can't wipe a session a sign-in has just stored.
+      const current = session();
+      if (!current || (s && current.uid === s.uid && current.token === s.token)) {
+        setSession(null);
+        forgetLibrary();
+      }
       throw fail("signIn", t("Your Bodian Music session expired, sign in again"));
     }
     if (NO_STREAM.includes(code)) throw fail("unavailable", t("Bodian Music can’t play this song"));
-    throw new Error(t("Bodian Music answered with an error ({code})", { code: Number.isFinite(code) ? code : "?" }));
+    // "api" says the answer came, and says no: a probe for a playlist in
+    // another of Bodian's lists can go on, a network failure can't.
+    throw fail("api", t("Bodian Music answered with an error ({code})", { code: Number.isFinite(code) ? code : "?" }));
   }
   return envelope.data;
 }
@@ -153,6 +204,9 @@ const plID = (source, raw) => `pl-${source || 0}-${raw}`;
 const bangID = (raw) => `bang-${raw}`;
 const albumID = (raw) => `al-${raw}`;
 const artistID = (raw) => `ar-${raw}`;
+// A calendar card is a story, not only its song: the same song can come back
+// on another day under another story, so the entry's id leads.
+const calendarID = (entry, song) => `cal-${entry}-${song}`;
 
 function digits(value) {
   const text = String(value ?? "").trim();
@@ -175,7 +229,7 @@ function parsePlaylistID(value) {
 // --- mapping ---------------------------------------------------------------
 
 function artistOf(id, name, image) {
-  return { id: artistID(id), name: name || "", imageUrl: image || "" };
+  return { id: artistID(id), name: name || "", imageUrl: safeURL(image) };
 }
 
 function toArtist(wire = {}) {
@@ -183,7 +237,9 @@ function toArtist(wire = {}) {
 }
 
 function toAlbum(wire = {}) {
-  const id = wire.albumId || wire.id || "";
+  // A track wire carries its song's id; only an album wire's own id names an
+  // album, so a track without an albumId gets none rather than the song's.
+  const id = wire.albumId || (wire.album || wire.albumPic ? "" : wire.id) || "";
   const artists = Array.isArray(wire.artists) && wire.artists.length
     ? wire.artists.map(toArtist)
     : wire.artist
@@ -192,7 +248,7 @@ function toAlbum(wire = {}) {
   return {
     id: id ? albumID(id) : "",
     name: wire.album || wire.name || "",
-    imageUrl: wire.albumPic || wire.pic || "",
+    imageUrl: safeURL(wire.albumPic || wire.pic),
     artists,
     released: /^\d{4}-\d{2}-\d{2}$/.test(String(wire.showtime || "")) ? wire.showtime : "",
   };
@@ -224,7 +280,7 @@ function toPlaylist(wire = {}) {
   return {
     id: plID(source, raw),
     name: wire.name || wire.title || "",
-    imageUrl: wire.pic || wire.cover || "",
+    imageUrl: safeURL(wire.pic || wire.cover),
     description: wire.description || "",
     owner: wire.creatorName || wire.creator_name || wire.nickname || "",
     trackCount: Number(wire.musicCount ?? wire.musicnum ?? wire.total) || 0,
@@ -236,7 +292,7 @@ function toChart(wire = {}) {
   return {
     id: bangID(wire.id),
     name: wire.name || "",
-    imageUrl: wire.pic || "",
+    imageUrl: safeURL(wire.pic),
     description: wire.pub ? t("Updated {date}", { date: wire.pub }) : "",
     trackCount: Number(wire.total) || (Array.isArray(wire.musics) ? wire.musics.length : 0),
   };
@@ -247,17 +303,29 @@ function toComment(wire = {}) {
   return {
     id: String(wire.id ?? ""),
     author: user.nickname || wire.nickname || "",
-    avatarUrl: user.headImg || wire.headImg || "",
+    avatarUrl: safeURL(user.headImg || wire.headImg),
     text: wire.content || "",
-    time: commentTime(wire.createTime),
+    time: commentTime(wire.publishTime || wire.createTime),
     likes: Number(wire.likeCount) || 0,
     liked: Number(wire.like) !== 0,
   };
 }
 
+// Bodian says a comment's time as the app in China does, sometimes with only
+// its day; both are read as Beijing time rather than the listener's.
 function commentTime(text) {
-  const t = Date.parse(String(text || "").replace(" ", "T"));
-  return Number.isFinite(t) ? t : 0;
+  const value = String(text || "").trim();
+  let match = /^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?/.exec(value);
+  if (!match) {
+    match = /^(\d{2})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?/.exec(value);
+    if (!match) return 0;
+    match = [match[0], `20${match[1]}`, match[2], match[3], match[4], match[5], match[6]];
+  }
+  const at = Date.UTC(
+    Number(match[1]), Number(match[2]) - 1, Number(match[3]),
+    (Number(match[4]) || 0) - 8, Number(match[5]) || 0, Number(match[6]) || 0,
+  );
+  return Number.isFinite(at) ? at : 0;
 }
 
 // --- base64 ----------------------------------------------------------------
@@ -309,13 +377,13 @@ function utf8(bytes) {
 
 // --- signing in ------------------------------------------------------------
 
-async function profileOf(uid) {
-  const data = await get(`ucenter/users/pub/${uid}`, { fromUid: uid, platform: "ios" });
+async function profileOf(uid, until) {
+  const data = await get(`ucenter/users/pub/${uid}`, { fromUid: uid, platform: "ios" }, { deadline: until });
   const user = (data && data.userInfo) || data || {};
   return {
     id: String(user.id || uid),
     name: user.nickname || user.name || t("Bodian Music listener"),
-    imageUrl: user.headImg || user.avatar || "",
+    imageUrl: safeURL(user.headImg || user.avatar),
     page: "me",
   };
 }
@@ -327,9 +395,11 @@ export async function signIn() {
   const content = `https://bodian-oia.kuwo.cn/bodian/download.html?pageName=login_pc&pt=3&id=${encodeURIComponent(qrCode)}`;
   host.signInPrompt({ qr: content, text: t("Scan with the Bodian Music app and confirm on your phone") });
 
-  const deadline = Date.now() + 180000;
+  // Leave the host's five minutes room for the login and the profile.
+  const ends = Date.now() + 240000;
+  const pollUntil = Math.min(Date.now() + 150000, ends - 60000);
   let confirmed = false;
-  while (Date.now() < deadline) {
+  while (Date.now() < pollUntil) {
     await new Promise((resolve) => setTimeout(resolve, 1500));
     let status;
     try {
@@ -345,31 +415,47 @@ export async function signIn() {
   }
   if (!confirmed) throw new Error(t("Sign-in was cancelled or timed out"));
 
-  // The phone confirmed it; the session may take a moment to be issued.
-  for (let attempt = 0; attempt < 5; attempt++) {
+  // The phone confirmed it; the session may take a moment to be issued. The
+  // login is retried only until a session comes back: the QR code is spent
+  // once it does, and the profile is asked for separately.
+  let data = null;
+  for (let attempt = 0; attempt < 5 && !data; attempt++) {
+    if (Date.now() > ends - 20000) break;
     try {
-      const data = await post("ucenter/users/login", { authType: 10, qrCode });
-      const uid = data && (data.id || (data.userInfo && data.userInfo.id));
-      if (!data || !data.token || !uid) throw new Error(t("Bodian Music did not return a session"));
-      setSession({ uid: String(uid), token: data.token });
-      const profile = await profileOf(uid);
-      if (data.userInfo) {
-        profile.name = data.userInfo.nickname || profile.name;
-        profile.imageUrl = data.userInfo.headImg || profile.imageUrl;
-      }
-      host.signInPrompt({ text: t("Signed in") });
-      return profile;
+      const answer = await post("ucenter/users/login", { authType: 10, qrCode });
+      const id = answer && (answer.id || (answer.userInfo && answer.userInfo.id));
+      if (!answer || !answer.token || !id) throw new Error(t("Bodian Music did not return a session"));
+      data = answer;
     } catch (error) {
       if (error && error.code === "unavailable") throw error;
       if (attempt === 4) throw error;
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
   }
-  throw new Error(t("Sign-in failed, scan again"));
+  const uid = data && (data.id || (data.userInfo && data.userInfo.id));
+  if (!data || !data.token || !uid) throw new Error(t("Sign-in failed, scan again"));
+  setSession({ uid: String(uid), token: data.token });
+  forgetLibrary();
+
+  let profile = null;
+  try {
+    profile = await profileOf(uid);
+  } catch (error) {
+    if (error && error.code === "signIn") throw error;
+    // The session is good; a profile that didn't load leaves the name out.
+  }
+  if (!profile) profile = { id: String(uid), name: t("Bodian Music listener"), imageUrl: "", page: "me" };
+  if (data.userInfo) {
+    profile.name = data.userInfo.nickname || profile.name;
+    profile.imageUrl = safeURL(data.userInfo.headImg) || profile.imageUrl;
+  }
+  host.signInPrompt({ text: t("Signed in") });
+  return profile;
 }
 
 export function signOut() {
   setSession(null);
+  forgetLibrary();
 }
 
 export async function account() {
@@ -506,7 +592,7 @@ export async function stations() {
       id: `scene-${scene.id}`,
       name: scene.name || "",
       description: t("Scene radio · {name}", { name: scene.name || "" }),
-      imageUrl: scene.pic || "",
+      imageUrl: safeURL(scene.pic),
     });
   }
   return out;
@@ -517,15 +603,17 @@ export async function stationNext({ id }) {
   const scene = /^scene-(\d+)$/.exec(key);
   if (key !== "guess" && !scene) throw fail("unavailable", t("Invalid Bodian Music station"));
 
+  const until = deadline();
   const seen = stationPlayed.get(key) || new Set();
   const page = stationAt.get(key) || 0;
   // A page may hold songs the station already played; the listener asked for
   // more, so read on until there is something new.
   for (let tries = 1; tries <= 3; tries += 1) {
+    if (expired(until)) throw timedOut();
     const next = page + tries;
     const data = key === "guess"
-      ? await get("service/music/recommendList", { pn: next, rn: 30, select_card: 1 })
-      : await get(`service/category/${scene[1]}/musics`, { pn: next, rn: PAGE });
+      ? await get("service/music/recommendList", { pn: next, rn: 30, select_card: 1 }, { deadline: until })
+      : await get(`service/category/${scene[1]}/musics`, { pn: next, rn: PAGE }, { deadline: until });
     const tracks = (data.musicList || []).map(toTrack).filter((track) => track.id && !seen.has(track.id));
     if (tracks.length) {
       stationAt.set(key, next);
@@ -558,18 +646,30 @@ async function guessTracks(count = 20) {
   return out;
 }
 
+// settle answers what a section fetched, or what it shows without it.
+function settle(promise, fallback) {
+  return promise.then((value) => ({ value }), (error) => ({ error, fallback }));
+}
+
 async function homeSections() {
   const sections = [];
-  const [daily, guess, lab, video, themes, similar, featured, chartList] = await Promise.all([
-    dailySongs().catch(() => []),
-    guessTracks(10).catch(() => []),
-    module(4).catch(() => null),
-    module(11).catch(() => null),
-    themedSections().catch(() => []),
-    session() ? module(10).catch(() => null) : null,
-    featuredPlaylists(24).catch(() => []),
-    charts().catch(() => []),
+  const parts = await Promise.all([
+    settle(dailySongs(), []),
+    settle(guessTracks(10), []),
+    settle(module(4), null),
+    settle(module(11), null),
+    settle(themedSections(), []),
+    session() ? settle(module(10), null) : { value: null },
+    settle(featuredPlaylists(24), []),
+    settle(charts(), []),
   ]);
+  // A section that failed leaves the rest standing, but a session that ran
+  // out is the listener's to answer, not the page's to swallow.
+  const failed = parts.filter((part) => part.error);
+  const signedOut = failed.find((part) => part.error && part.error.code === "signIn");
+  if (signedOut) throw signedOut.error;
+  const [daily, guess, lab, video, themes, similar, featured, chartList] =
+    parts.map((part) => (part.error ? part.fallback : part.value));
 
   if (daily.length) {
     sections.push({
@@ -612,6 +712,9 @@ async function homeSections() {
   if (chartList.length) {
     sections.push({ title: t("Charts"), playlists: chartList.slice(0, 8), morePage: "charts" });
   }
+  // Every section failed: let the app show its error and offer a retry,
+  // rather than an empty Home that looks like an account with nothing in it.
+  if (!sections.length && failed.length) throw failed[0].error;
   return sections;
 }
 
@@ -636,11 +739,16 @@ async function themedSections() {
 }
 
 export async function home() {
-  return { title: t("Discover"), subtitle: t("Bodian Music · sign in to see your playlists"), sections: await homeSections() };
+  return {
+    title: t("Discover"),
+    subtitle: session() ? t("Bodian Music") : t("Bodian Music · sign in to see your playlists"),
+    sections: await homeSections(),
+  };
 }
 
 const SQUARE_PAGE = 60;
 const TOPIC_PAGE = 60;
+const CALENDAR_PAGE = 30;
 
 // Bodian's category tree: six groups, each with the leaf ids its playlists
 // are filed under. Only the leaves filter; a group's own id answers nothing.
@@ -678,7 +786,7 @@ function toTopic(wire = {}) {
   return {
     id: topicID(wire.id),
     name: wire.name || "",
-    imageUrl: wire.pic || "",
+    imageUrl: safeURL(wire.pic),
     description: wire.description || "",
     trackCount: Number(wire.musicCnt) || 0,
   };
@@ -688,6 +796,82 @@ async function topicPage(page) {
   const pn = Math.max(1, Number(page) || 1);
   const data = await get("service/music_topics/list", { pn, rn: TOPIC_PAGE });
   return { playlists: (data.lists || []).map(toTopic), total: Number(data.total) || 0, pn };
+}
+
+// 音乐日历: a song of the day with the story Bodian tells about it. The card
+// shows the story; its source id is the song's.
+const CALENDAR_STORIES = "calendarStories";
+// The host keeps a page of cards after the plugin has stopped holding it, so
+// the stories read are kept for the next run too.
+const CALENDAR_STORY_LIMIT = 1000;
+let calendarStories = null;
+let storiesDirty = false;
+
+function calendarStoriesOf() {
+  if (!calendarStories) {
+    const saved = host.storage.get(CALENDAR_STORIES);
+    calendarStories = saved && typeof saved === "object" && !Array.isArray(saved) ? saved : {};
+  }
+  return calendarStories;
+}
+
+function rememberStory(id, story) {
+  const all = calendarStoriesOf();
+  const old = all[id];
+  if (old && old.name === story.name && old.imageUrl === story.imageUrl && old.description === story.description) return;
+  all[id] = story;
+  storiesDirty = true;
+}
+
+function saveStories() {
+  if (!storiesDirty) return;
+  const all = calendarStoriesOf();
+  const keys = Object.keys(all);
+  // Oldest first, as they were read.
+  for (const key of keys.slice(0, Math.max(0, keys.length - CALENDAR_STORY_LIMIT))) delete all[key];
+  host.storage.set(CALENDAR_STORIES, all);
+  storiesDirty = false;
+}
+
+function toCalendarEntry(wire = {}) {
+  const entry = String(wire.id || "");
+  const song = String(wire.source || "");
+  // Bodian files the calendar's song under sourceType 2; another kind of
+  // entry would need an endpoint this page does not have.
+  if (!entry || !song || Number(wire.sourceType) !== 2) return null;
+  const story = {
+    name: wire.title || "",
+    imageUrl: safeURL(wire.pic),
+    description: [wire.tag, wire.showDate].filter(Boolean).join(" · "),
+  };
+  const id = calendarID(entry, song);
+  rememberStory(id, story);
+  return { id, ...story };
+}
+
+async function calendarSong(raw, until) {
+  // A song Bodian has taken down answers no info, or says so outright.
+  const info = await get("service/music/info", { musicId: raw }, { deadline: until });
+  if (!info || !info.id) throw fail("unavailable", t("Bodian Music can’t play this song"));
+  return toTrack(info);
+}
+
+async function calendarPage(page) {
+  const pn = Math.max(1, Number(page) || 1);
+  const data = await get("service/musicCalendar/list/history", { pn, rn: CALENDAR_PAGE });
+  const list = Array.isArray(data.list) ? data.list : [];
+  // A day without a song has nothing to open.
+  const playlists = list.map(toCalendarEntry).filter(Boolean);
+  saveStories();
+  return { playlists, pn, more: list.length >= CALENDAR_PAGE };
+}
+
+// 歌手: the artists Bodian picks for its discovery page.
+async function pickedArtists() {
+  const data = await get("service/finds/module", { moduleId: 54, categoryId: 1 });
+  return (data.artistList || [])
+    .filter((wire) => wire && wire.id && wire.name)
+    .map(toArtist);
 }
 
 async function squarePage(page) {
@@ -706,12 +890,18 @@ export async function browse({ page }) {
   if (page === "square" || /^square-\d+$/.test(String(page))) {
     const wanted = page === "square" ? 1 : Number(String(page).slice("square-".length));
     const { playlists, total, pn } = await squarePage(wanted);
-    const sections = [{ title: t("Playlist Square"), playlists }];
+    // The page already says its title; a section titled the same reads twice.
+    // The way into the categories sits above the grid, where it's seen without
+    // scrolling through it.
+    const sections = [
+      { links: [{ title: t("Browse by category"), subtitle: t("Pick a category to browse its playlists"), page: "cat" }] },
+      { playlists },
+    ];
     const shown = (pn - 1) * SQUARE_PAGE + playlists.length;
-    const links = [{ title: t("Browse by category"), page: "cat" }];
+    const links = [];
     if (shown < total) links.push({ title: t("Next Page"), subtitle: t("Shown {shown} of {total}", { shown, total }), page: `square-${pn + 1}` });
     if (pn > 1) links.push({ title: t("Previous Page"), page: `square-${pn - 1}` });
-    sections.push({ title: t("More"), links });
+    if (links.length) sections.push({ title: t("More"), links });
     return { title: t("Playlist Square"), subtitle: t("Playlists Bodian Music listeners shared"), sections };
   }
   if (page === "cat") {
@@ -730,7 +920,9 @@ export async function browse({ page }) {
     const wanted = cat[2] ? Number(cat[2]) : 1;
     const [{ playlists, total, pn }, name] = await Promise.all([categoryPage(id, wanted), categoryName(id)]);
     const title = name || t("Categories");
-    const sections = [{ title, playlists }];
+    // Bodian's tree lists a few categories it has no playlists for; say so
+    // rather than showing a page with nothing on it.
+    const sections = [{ playlists, empty: t("No playlists in this category yet") }];
     const shown = (pn - 1) * SQUARE_PAGE + playlists.length;
     const links = [];
     if (shown < total) links.push({ title: t("Next Page"), subtitle: t("Shown {shown} of {total}", { shown, total }), page: `cat-${id}-${pn + 1}` });
@@ -741,7 +933,7 @@ export async function browse({ page }) {
   if (page === "topics" || /^topics-\d+$/.test(String(page))) {
     const wanted = page === "topics" ? 1 : Number(String(page).slice("topics-".length));
     const { playlists, total, pn } = await topicPage(wanted);
-    const sections = [{ title: t("Topics"), playlists }];
+    const sections = [{ playlists }];
     const shown = (pn - 1) * TOPIC_PAGE + playlists.length;
     const links = [];
     if (shown < total) links.push({ title: t("Next Page"), subtitle: t("Shown {shown} of {total}", { shown, total }), page: `topics-${pn + 1}` });
@@ -749,10 +941,33 @@ export async function browse({ page }) {
     if (links.length) sections.push({ title: t("More"), links });
     return { title: t("Topics"), subtitle: t("Bodian Music listeners’ topics"), sections };
   }
+  if (page === "calendar" || /^calendar-\d+$/.test(String(page))) {
+    const wanted = page === "calendar" ? 1 : Number(String(page).slice("calendar-".length));
+    const { playlists, pn, more } = await calendarPage(wanted);
+    const sections = [{ playlists, empty: t("No calendar entries yet") }];
+    const links = [];
+    // The calendar answers no total, so a full page is what says there may be
+    // another one behind it.
+    if (more) links.push({ title: t("Next Page"), page: `calendar-${pn + 1}` });
+    if (pn > 1) links.push({ title: t("Previous Page"), page: `calendar-${pn - 1}` });
+    if (links.length) sections.push({ title: t("More"), links });
+    return { title: t("Music Calendar"), subtitle: t("A song and a story for every day"), sections };
+  }
+  if (page === "artists") {
+    const artists = await pickedArtists();
+    return {
+      title: t("Artists"),
+      subtitle: t("Bodian Music’s picks for you"),
+      sections: [{ artists, empty: t("No artists to show yet") }],
+    };
+  }
   if (page === "me") {
     const s = await requireSession();
-    const [mine, saved] = await myPlaylists(s.uid);
-    const profile = await profileOf(s.uid).catch(() => null);
+    const until = deadline();
+    const [[mine, saved], profile] = await Promise.all([
+      myPlaylists(s.uid, until),
+      profileOf(s.uid, until).catch(() => null),
+    ]);
     return {
       title: profile ? profile.name : t("My Bodian Music"),
       imageUrl: profile ? profile.imageUrl : "",
@@ -767,51 +982,93 @@ export async function browse({ page }) {
 
 // --- library ---------------------------------------------------------------
 
-async function myPlaylists(uid) {
-  const data = await get("service/playlist/userCreate", { userId: uid });
+// The ids of the listener's own playlists, and of those they saved, as the
+// library lists them: the id a playlist is found by need not be the same.
+const ownPlaylistIDs = new Set();
+const savedPlaylistIDs = new Set();
+
+async function myPlaylists(uid, until) {
+  const data = await get("service/playlist/userCreate", { userId: uid }, { deadline: until });
   const mine = (data.playLists || []).map(toPlaylist).map((p) => ({ ...p, mine: true }));
+  for (const p of mine) ownPlaylistIDs.add(p.id);
   const saved = [];
+  const fresh = new Set();
+  let complete = true;
   try {
-    const collected = await get("service/collect/4/list", { userId: uid, pn: 1, rn: 100 });
-    for (const p of collected.playLists || []) {
-      if (Number(p.sourceType) === SOURCE_OTHERS) saved.push({ ...toPlaylist(p), saved: true });
+    for (let pn = 1; pn <= 10; pn++) {
+      if (expired(until)) {
+        complete = false;
+        break;
+      }
+      const collected = await get("service/collect/4/list", { userId: uid, pn, rn: 100 }, { deadline: until });
+      const list = collected.playLists || [];
+      for (const p of list) {
+        if (Number(p.sourceType) === SOURCE_OTHERS) {
+          saved.push({ ...toPlaylist(p), saved: true });
+          fresh.add(plID(SOURCE_OTHERS, String(p.id)));
+        }
+      }
+      if (list.length < 100) break;
     }
   } catch (error) {
     // Saved lists are the listener's own; a failure here leaves them out.
+    complete = false;
   }
+  // A walk that was cut short adds what it saw but doesn't forget the rest.
+  if (complete) savedPlaylistIDs.clear();
+  for (const id of fresh) savedPlaylistIDs.add(id);
   return [mine, saved];
 }
 
 export async function playlists() {
   const s = session();
   if (!s) return [];
-  const [mine, saved] = await myPlaylists(s.uid);
+  const [mine, saved] = await myPlaylists(s.uid, deadline());
   return [...mine, ...saved];
 }
 
-async function playlistSource(raw, source) {
+// order says which of Bodian's lists to try after the one the id names. A
+// topic's playlist is one a listener made (5), while source 4 can hold a
+// different playlist that happens to have the same id.
+async function playlistSource(raw, source, until, order) {
   const path = `service/playlist/info/${raw}`;
   const tried = [];
-  for (const st of [source, SOURCE_OTHERS, SOURCE_LIKED, SOURCE_OWN]) {
+  for (const st of [source, ...(order || [SOURCE_OTHERS, SOURCE_LIKED, SOURCE_OWN])]) {
     if (!st || tried.includes(st)) continue;
     tried.push(st);
+    if (expired(until)) throw timedOut();
     let info;
     try {
-      info = await get(path, { source: st });
+      info = await get(path, { source: st }, { deadline: until });
     } catch (error) {
-      continue;
+      // Only "not in this list" carries on to the next one; a network
+      // failure or a timeout is the listener's answer, not a wrong source.
+      if (error && error.code === "api") continue;
+      throw error;
     }
     if (info && info.id && info.name) return { info, source: st };
   }
   throw fail("unavailable", t("This playlist is gone, or your account can’t see it"));
 }
 
-async function playlistTracks(raw, source) {
+// A playlist is the listener's own when the library lists it, or when Bodian
+// says they made it. The list it was found in is not enough: every search
+// result is source 5 too.
+function mineNow(info, raw) {
+  if (ownPlaylistIDs.has(plID(SOURCE_OWN, raw))) return true;
+  const s = session();
+  if (!s) return false;
+  const creator = Number(info && info.creatorId) || 0;
+  return creator !== 0 && creator === Number(s.uid);
+}
+
+async function playlistTracks(raw, source, until) {
   const out = [];
   for (let pn = 1; pn <= 20; pn++) {
+    if (expired(until)) break;
     let data;
     try {
-      data = await get(`service/playlist/${raw}/musicList`, { pn, rn: PLAYLIST_LIMIT, source });
+      data = await get(`service/playlist/${raw}/musicList`, { pn, rn: PLAYLIST_LIMIT, source }, { deadline: until });
     } catch (error) {
       if (pn === 1) throw error;
       break;
@@ -825,29 +1082,52 @@ async function playlistTracks(raw, source) {
 }
 
 export async function playlist({ id }) {
+  const until = deadline();
+  if (/^cal-\d+-\d+$/.test(String(id))) {
+    const [, entry, song] = /^cal-(\d+)-(\d+)$/.exec(String(id));
+    const track = await calendarSong(song, until);
+    const story = calendarStoriesOf()[calendarID(entry, song)];
+    return {
+      id: calendarID(entry, song),
+      // The story is what the card promised; the song's name is what is left
+      // when the card was not the way in.
+      name: (story && story.name) || track.name || t("Music Calendar"),
+      imageUrl: (story && story.imageUrl) || track.album.imageUrl || "",
+      description: story ? story.description : "",
+      trackCount: 1,
+      tracks: [track],
+      // A calendar entry is a page, not a playlist the listener can collect.
+      mine: true,
+    };
+  }
   if (/^tp-\d+$/.test(String(id))) {
     const raw = parsePrefixed(id, "tp");
-    const topic = await get("service/music_topics/details", { topicId: raw });
+    const topic = await get("service/music_topics/details", { topicId: raw }, { deadline: until });
     if (!topic || !topic.id) throw fail("unavailable", t("This topic is gone"));
     let pl = null;
     if (topic.playlistId) {
       try {
-        const { info, source } = await playlistSource(String(topic.playlistId), 0);
-        pl = toPlaylist(info);
-        pl.tracks = await playlistTracks(String(topic.playlistId), source);
+        // A topic's playlist is one a listener made (5), not one of the
+        // square's (4), which may hold another playlist with the same id.
+        const { info, source } = await playlistSource(
+          String(topic.playlistId), 0, until, [SOURCE_OWN, SOURCE_LIKED, SOURCE_OTHERS]);
+        const tracks = await playlistTracks(String(topic.playlistId), source, until);
+        pl = { ...toPlaylist(info), tracks };
       } catch (error) {
-        // The topic's playlist is gone; the clips it lists still name songs.
+        // The topic's playlist is gone or unreadable; the clips it lists
+        // still name songs.
+        pl = null;
       }
     }
     if (!pl) {
-      const data = await get("service/music_topics/music_list", { topicId: raw, pn: 1, rn: 30 });
+      const data = await get("service/music_topics/music_list", { topicId: raw, pn: 1, rn: 30 }, { deadline: until });
       const ids = [...new Set((data.lists || []).map((clip) => clip.musicId).filter(Boolean))];
       const infos = await Promise.all(ids.slice(0, 30).map((musicId) =>
-        get("service/music/info", { musicId }).catch(() => null)));
+        get("service/music/info", { musicId }, { deadline: until }).catch(() => null)));
       pl = {
         id: topicID(raw),
         name: topic.name || "",
-        imageUrl: topic.pic || "",
+        imageUrl: safeURL(topic.pic),
         description: topic.description || "",
         tracks: infos.filter(Boolean).map(toTrack),
       };
@@ -856,30 +1136,39 @@ export async function playlist({ id }) {
       ...pl,
       id: topicID(raw),
       name: topic.name || pl.name || "",
-      imageUrl: topic.pic || pl.imageUrl || "",
+      imageUrl: safeURL(topic.pic) || pl.imageUrl || "",
       description: topic.description || pl.description || "",
-      trackCount: pl.tracks.length,
+      trackCount: (pl.tracks || []).length,
+      // The app offers Save on any playlist page whose Mine is unset; a
+      // topic is not a playlist the listener can collect.
+      mine: true,
     };
   }
   if (/^bang-\d+$/.test(String(id))) {
     const raw = parsePrefixed(id, "bang");
-    const data = await get(`service/bang/${raw}/musics`, { pn: 1, rn: PLAYLIST_LIMIT });
+    const data = await get(`service/bang/${raw}/musics`, { pn: 1, rn: PLAYLIST_LIMIT }, { deadline: until });
     return {
       id: bangID(raw),
       name: data.name || t("Charts"),
-      imageUrl: data.pic || "",
+      imageUrl: safeURL(data.pic),
       description: data.pub ? t("Updated {date}", { date: data.pub }) : "",
       trackCount: Number(data.total) || (data.musics || []).length,
       tracks: (data.musics || []).map(toTrack),
+      // A chart is not a playlist the listener can collect, either.
+      mine: true,
     };
   }
   const { source, raw } = parsePlaylistID(id);
-  const { info, source: st } = await playlistSource(raw, source);
+  const { info, source: st } = await playlistSource(raw, source, until);
   const pl = toPlaylist(info);
-  pl.id = plID(st, raw);
-  pl.mine = st === SOURCE_OWN;
-  pl.saved = st === SOURCE_OTHERS && !!info.collect;
-  pl.tracks = await playlistTracks(raw, st);
+  pl.mine = mineNow(info, raw);
+  // A playlist of the listener's own keeps the id the library lists it under,
+  // whichever of Bodian's lists it was found in.
+  pl.id = plID(pl.mine ? SOURCE_OWN : st, raw);
+  // The id a playlist was found by (5, say) needn't be the one the library
+  // lists it under (4), so the raw id says whether it is saved.
+  pl.saved = savedPlaylistIDs.has(plID(SOURCE_OTHERS, raw)) || (st === SOURCE_OTHERS && !!info.collect);
+  pl.tracks = await playlistTracks(raw, st, until);
   if (!pl.trackCount) pl.trackCount = pl.tracks.length;
   return pl;
 }
@@ -891,7 +1180,9 @@ export async function createPlaylist({ name }) {
   const data = await post("service/playlist", { name: title, private: false });
   const raw = data && (data.id || data.playlistId);
   if (!raw) throw new Error(t("Bodian Music did not return the new playlist’s ID"));
-  return { id: plID(SOURCE_OWN, raw), name: title, mine: true, trackCount: 0, tracks: [] };
+  const id = plID(SOURCE_OWN, raw);
+  ownPlaylistIDs.add(id);
+  return { id, name: title, mine: true, trackCount: 0, tracks: [] };
 }
 
 export async function renamePlaylist({ id, name }) {
@@ -910,6 +1201,7 @@ export async function deletePlaylist({ id }) {
   await requireSession();
   const { raw } = parsePlaylistID(id);
   await request("service/playlist", { method: "DELETE", body: { playlistIds: [Number(raw)] } });
+  ownPlaylistIDs.delete(plID(SOURCE_OWN, raw));
 }
 
 async function editSongs(path, id, trackIds) {
@@ -940,8 +1232,15 @@ async function collect(source, rawId, on) {
 }
 
 export async function savePlaylist({ id, on }) {
-  const { raw } = parsePlaylistID(id);
+  const key = String(id || "");
+  // A chart or a topic is a page, not a playlist to collect; say so rather
+  // than failing on its id.
+  if (/^(bang|tp)-/.test(key)) throw fail("unsupported", t("Bodian Music can’t save that"));
+  const { raw } = parsePlaylistID(key);
   await collect(SOURCE_OTHERS, raw, on);
+  const saved = plID(SOURCE_OTHERS, raw);
+  if (on) savedPlaylistIDs.add(saved);
+  else savedPlaylistIDs.delete(saved);
 }
 
 export async function saveAlbum({ id, on }) {
@@ -952,37 +1251,67 @@ export async function followArtist({ id, on }) {
   await collect(SOURCE_ARTIST, parsePrefixed(id, "ar"), on);
 }
 
-async function likedPlaylistID(uid) {
-  const data = await get("service/playlist/fond", { userId: uid });
+async function likedPlaylistID(uid, until) {
+  const data = await get("service/playlist/fond", { userId: uid }, { deadline: until });
   return String(data && data.id ? data.id : "");
 }
 
 let likedCache = null;
+let likedLoading = null;
+let likedGeneration = 0;
 
-async function likedIDs(uid) {
-  if (likedCache && likedCache.uid === uid && Date.now() - likedCache.at < 60000) return likedCache.ids;
-  const pid = await likedPlaylistID(uid);
+// A session that starts or ends forgets what the last one's library was.
+function forgetLibrary() {
+  ownPlaylistIDs.clear();
+  savedPlaylistIDs.clear();
+  likedCache = null;
+  likedLoading = null;
+  likedGeneration += 1;
+}
+
+async function loadLikedIDs(uid) {
+  const generation = likedGeneration;
+  const until = deadline();
+  const pid = await likedPlaylistID(uid, until);
   if (!pid) return [];
   const ids = [];
   for (let pn = 1; pn <= 100; pn++) {
-    const data = await get(`service/playlist/${pid}/musicList`, { pn, rn: 100, source: SOURCE_OWN });
+    if (expired(until)) throw timedOut();
+    const data = await get(`service/playlist/${pid}/musicList`, { pn, rn: 100, source: SOURCE_OWN }, { deadline: until });
     const list = data.list || [];
     for (const t of list) ids.push(String(t.id));
     if (list.length < 100) break;
   }
-  likedCache = { uid, ids, at: Date.now() };
+  // A like during the walk changed the set it was reading: leave the cache
+  // empty so the next ask reads it again rather than the stale snapshot.
+  if (generation === likedGeneration) likedCache = { uid, ids, at: Date.now() };
   return ids;
+}
+
+// likedIDs answers the whole liked set; callers asking at the same time wait
+// on one walk of it rather than each starting their own.
+async function likedIDs(uid) {
+  if (likedCache && likedCache.uid === uid && Date.now() - likedCache.at < 60000) return likedCache.ids;
+  if (likedLoading && likedLoading.uid === uid) return likedLoading.promise;
+  const promise = loadLikedIDs(uid);
+  likedLoading = { uid, promise };
+  try {
+    return await promise;
+  } finally {
+    if (likedLoading && likedLoading.promise === promise) likedLoading = null;
+  }
 }
 
 export async function liked({ offset = 0 }) {
   const s = await requireSession();
-  const pid = await likedPlaylistID(s.uid);
+  const until = deadline();
+  const pid = await likedPlaylistID(s.uid, until);
   if (!pid) return { tracks: [], more: false };
   const page = await get(`service/playlist/${pid}/musicList`, {
     pn: Math.floor(offset / PAGE) + 1,
     rn: PAGE,
     source: SOURCE_OWN,
-  });
+  }, { deadline: until });
   const list = page.list || [];
   return { tracks: list.map(toTrack), more: list.length >= PAGE };
 }
@@ -996,25 +1325,42 @@ export async function isLiked({ ids }) {
 
 export async function like({ id, on }) {
   const s = await requireSession();
-  const pid = await likedPlaylistID(s.uid);
+  const until = deadline();
+  const raw = digits(id);
+  const pid = await likedPlaylistID(s.uid, until);
   if (!pid) throw new Error(t("This account has no Liked Songs playlist yet"));
   await post(on ? "service/playlist/music" : "service/playlist/music/delete", {
     playListId: Number(pid),
-    musicIdList: [Number(digits(id))],
-  });
-  likedCache = null;
+    musicIdList: [Number(raw)],
+  }, { deadline: until });
+  // Keep the set the hearts read from in step, rather than dropping it and
+  // walking the whole playlist again. A walk already in flight is left to
+  // answer its callers but won't store its pre-like snapshot.
+  likedGeneration += 1;
+  if (likedCache && likedCache.uid === String(s.uid)) {
+    const ids = new Set(likedCache.ids);
+    if (on) ids.add(raw);
+    else ids.delete(raw);
+    likedCache = { uid: likedCache.uid, ids: [...ids], at: Date.now() };
+  }
 }
 
 // --- albums and artists ----------------------------------------------------
 
 export async function album({ id }) {
   const raw = parsePrefixed(id, "al");
-  const data = await get(`service/album/${raw}`);
+  const until = deadline();
+  const data = await get(`service/album/${raw}`, undefined, { deadline: until });
   const info = data.albumInfo || {};
   if (!info.id && !info.name) throw fail("unavailable", t("This album isn’t available"));
-  const songs = await get(`service/album/music/${raw}`, { pn: 1, rn: 1000 });
+  const [songs, state] = await Promise.all([
+    get(`service/album/music/${raw}`, { pn: 1, rn: 1000 }, { deadline: until }),
+    get("service/collect/multipleState", { source: SOURCE_ALBUM, sourceIds: raw }, { deadline: until })
+      .catch(() => ({ result: [] })),
+  ]);
+  const saved = (state.result || []).some((row) => String(row.id) === raw && !!row.collect);
   return {
-    album: toAlbum({ ...info, albumId: info.albumId || info.id }),
+    album: { ...toAlbum({ ...info, albumId: info.albumId || info.id }), saved },
     tracks: (songs.resultList || []).map(toTrack),
   };
 }
@@ -1108,13 +1454,17 @@ function parseSize(text) {
   return Math.round(Number(m[1]) * unit);
 }
 
-async function audioFor(raw, br) {
-  const data = await get("play/music/v2/audioUrl", { devId: devid(), musicId: raw, br, freeSign: "" });
+async function audioFor(raw, br, until) {
+  const data = await get("play/music/v2/audioUrl", { devId: devid(), musicId: raw, br, freeSign: "" }, { deadline: until });
   if (!data || !data.audioUrl) return null;
   const type = String(data.format || "").toLowerCase();
   if (type !== "mp3" && type !== "flac") return null;
+  // The app would play a file:// URL as readily as a stream; only the web is
+  // a place a song comes from.
+  const url = safeURL(data.audioHttpsUrl) || safeURL(data.audioUrl);
+  if (!url) return null;
   return {
-    url: data.audioHttpsUrl || data.audioUrl,
+    url,
     type,
     bitRate: Number(data.bitrate) || br,
     size: parseSize(data.size),
@@ -1131,11 +1481,13 @@ export async function stream({ id, quality = "high" }) {
   const pinned = host.setting("quality");
   const chosen = BITRATES[pinned] ? pinned : quality;
   const asked = BITRATES[chosen] ? chosen : "high";
+  const until = deadline();
   let best = null;
   for (const br of BITRATES[asked]) {
+    if (expired(until)) break;
     let found;
     try {
-      found = await audioFor(raw, br);
+      found = await audioFor(raw, br, until);
     } catch (error) {
       if (error && error.code === "unavailable") continue;
       throw error;
