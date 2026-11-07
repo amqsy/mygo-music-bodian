@@ -661,6 +661,55 @@ export async function home() {
 }
 
 const SQUARE_PAGE = 60;
+const TOPIC_PAGE = 20;
+
+// Bodian's category tree: six groups, each with the leaf ids its playlists
+// are filed under. Only the leaves filter; a group's own id answers nothing.
+let categoryTree = null;
+
+async function categoryTreeOf() {
+  if (!categoryTree) categoryTree = await get("service/category/list");
+  return categoryTree;
+}
+
+async function categoryPage(id, page) {
+  const pn = Math.max(1, Number(page) || 1);
+  const data = await get(`service/category/${digits(id)}/playlist`, { pn, rn: SQUARE_PAGE });
+  return { playlists: (data.playLists || []).map(toPlaylist), total: Number(data.total) || 0, pn };
+}
+
+async function categoryName(id) {
+  try {
+    const tree = await categoryTreeOf();
+    for (const group of tree.categories || []) {
+      for (const sub of group.subCategories || []) {
+        if (String(sub.id) === String(id)) return sub.name || "";
+      }
+    }
+  } catch (error) {
+    // A category page can still open without its name.
+  }
+  return "";
+}
+
+// 话题: each topic has its own playlist, so a topic card opens like one.
+const topicID = (raw) => `tp-${raw}`;
+
+function toTopic(wire = {}) {
+  return {
+    id: topicID(wire.id),
+    name: wire.name || "",
+    imageUrl: wire.pic || "",
+    description: wire.description || "",
+    trackCount: Number(wire.musicCnt) || 0,
+  };
+}
+
+async function topicPage(page) {
+  const pn = Math.max(1, Number(page) || 1);
+  const data = await get("service/music_topics/list", { pn, rn: TOPIC_PAGE });
+  return { playlists: (data.lists || []).map(toTopic), total: Number(data.total) || 0, pn };
+}
 
 async function squarePage(page) {
   const pn = Math.max(1, Number(page) || 1);
@@ -680,11 +729,46 @@ export async function browse({ page }) {
     const { playlists, total, pn } = await squarePage(wanted);
     const sections = [{ title: t("Playlist Square"), playlists }];
     const shown = (pn - 1) * SQUARE_PAGE + playlists.length;
-    const links = [];
+    const links = [{ title: t("Browse by category"), page: "cat" }];
     if (shown < total) links.push({ title: t("Next Page"), subtitle: t("Shown {shown} of {total}", { shown, total }), page: `square-${pn + 1}` });
     if (pn > 1) links.push({ title: t("Previous Page"), page: `square-${pn - 1}` });
-    if (links.length) sections.push({ title: t("More"), links });
+    sections.push({ title: t("More"), links });
     return { title: t("Playlist Square"), subtitle: t("Playlists Bodian Music listeners shared"), sections };
+  }
+  if (page === "cat") {
+    const tree = await categoryTreeOf();
+    const sections = (tree.categories || [])
+      .filter((group) => Array.isArray(group.subCategories) && group.subCategories.length)
+      .map((group) => ({
+        title: group.name || "",
+        links: group.subCategories.map((sub) => ({ title: sub.name || "", page: `cat-${sub.id}` })),
+      }));
+    return { title: t("Categories"), subtitle: t("Pick a category to browse its playlists"), sections };
+  }
+  const cat = /^cat-(\d+)(?:-(\d+))?$/.exec(String(page));
+  if (cat) {
+    const id = cat[1];
+    const wanted = cat[2] ? Number(cat[2]) : 1;
+    const [{ playlists, total, pn }, name] = await Promise.all([categoryPage(id, wanted), categoryName(id)]);
+    const title = name || t("Categories");
+    const sections = [{ title, playlists }];
+    const shown = (pn - 1) * SQUARE_PAGE + playlists.length;
+    const links = [];
+    if (shown < total) links.push({ title: t("Next Page"), subtitle: t("Shown {shown} of {total}", { shown, total }), page: `cat-${id}-${pn + 1}` });
+    if (pn > 1) links.push({ title: t("Previous Page"), page: `cat-${id}-${pn - 1}` });
+    if (links.length) sections.push({ title: t("More"), links });
+    return { title, sections };
+  }
+  if (page === "topics" || /^topics-\d+$/.test(String(page))) {
+    const wanted = page === "topics" ? 1 : Number(String(page).slice("topics-".length));
+    const { playlists, total, pn } = await topicPage(wanted);
+    const sections = [{ title: t("Topics"), playlists }];
+    const shown = (pn - 1) * TOPIC_PAGE + playlists.length;
+    const links = [];
+    if (shown < total) links.push({ title: t("Next Page"), subtitle: t("Shown {shown} of {total}", { shown, total }), page: `topics-${pn + 1}` });
+    if (pn > 1) links.push({ title: t("Previous Page"), page: `topics-${pn - 1}` });
+    if (links.length) sections.push({ title: t("More"), links });
+    return { title: t("Topics"), subtitle: t("Bodian Music listeners’ topics"), sections };
   }
   if (page === "fresh") {
     const groups = await freshGroups();
@@ -774,6 +858,42 @@ async function playlistTracks(raw, source) {
 }
 
 export async function playlist({ id }) {
+  if (/^tp-\d+$/.test(String(id))) {
+    const raw = parsePrefixed(id, "tp");
+    const topic = await get("service/music_topics/details", { topicId: raw });
+    if (!topic || !topic.id) throw fail("unavailable", t("This topic is gone"));
+    let pl = null;
+    if (topic.playlistId) {
+      try {
+        const { info, source } = await playlistSource(String(topic.playlistId), 0);
+        pl = toPlaylist(info);
+        pl.tracks = await playlistTracks(String(topic.playlistId), source);
+      } catch (error) {
+        // The topic's playlist is gone; the clips it lists still name songs.
+      }
+    }
+    if (!pl) {
+      const data = await get("service/music_topics/music_list", { topicId: raw, pn: 1, rn: 30 });
+      const ids = [...new Set((data.lists || []).map((clip) => clip.musicId).filter(Boolean))];
+      const infos = await Promise.all(ids.slice(0, 30).map((musicId) =>
+        get("service/music/info", { musicId }).catch(() => null)));
+      pl = {
+        id: topicID(raw),
+        name: topic.name || "",
+        imageUrl: topic.pic || "",
+        description: topic.description || "",
+        tracks: infos.filter(Boolean).map(toTrack),
+      };
+    }
+    return {
+      ...pl,
+      id: topicID(raw),
+      name: topic.name || pl.name || "",
+      imageUrl: topic.pic || pl.imageUrl || "",
+      description: topic.description || pl.description || "",
+      trackCount: pl.tracks.length,
+    };
+  }
   if (/^bang-\d+$/.test(String(id))) {
     const raw = parsePrefixed(id, "bang");
     const data = await get(`service/bang/${raw}/musics`, { pn: 1, rn: PLAYLIST_LIMIT });
