@@ -164,7 +164,13 @@ test("the music calendar shows a day a card and pages back", async () => {
   // So is an entry of a kind this page has no way to open.
   days.push({ id: 2, title: "不是单曲的一天", source: 999, sourceType: 1 });
   const { mod, calls } = await loadPlugin({
-    handler: api({ "service/musicCalendar/list/history": ok({ list: days }) }),
+    handler: api({
+      "service/musicCalendar/list/history": ok({ list: days }),
+      "service/music/info": (url) => {
+        const id = Number(url.searchParams.get("musicId"));
+        return ok(track({ id, name: `歌 ${id}` }));
+      },
+    }),
   });
   const page = await mod.browse({ page: "calendar" });
   assert.equal(page.title, "Music Calendar");
@@ -176,6 +182,9 @@ test("the music calendar shows a day a card and pages back", async () => {
   assert.equal(card.name, "第 1 天");
   assert.equal(card.imageUrl, "http://img.example/cal.jpg");
   assert.equal(card.description, "音乐经典时刻 · 2026-11-07");
+  assert.equal(card.owner, "歌 825441 · 周杰伦", "the card names the song");
+  assert.equal(calls.filter((call) => call.url.pathname.endsWith("/service/music/info")).length, 29,
+    "an entry that has no song is not asked for");
   const more = page.sections.find((section) => section.title === "More");
   assert.ok(more.links.some((link) => link.page === "calendar-2"));
 
@@ -304,6 +313,27 @@ test("the artists page shows the artists Bodian picked", async () => {
   assert.deepEqual(artists.map((artist) => artist.id), ["ar-5371", "ar-336"]);
   assert.equal(artists[0].name, "G.E.M.邓紫棋");
   assert.equal(artists[0].imageUrl, "http://img.example/a.jpg");
+});
+
+test("the artists page also lists what their listeners listen to", async () => {
+  const { mod } = await loadPlugin({
+    handler: api({
+      "service/finds/module": ok({
+        artistList: [{ id: 1, name: "甲" }, { id: 2, name: "乙" }],
+      }),
+      "service/artist/similar/1": ok({
+        resultList: [{ id: 3, name: "丙" }, { id: 2, name: "乙" }, { id: 0 }],
+      }),
+      "service/artist/similar/2": ok({
+        resultList: [{ id: 3, name: "丙" }, { id: 4, name: "丁" }, { id: 5 }],
+      }),
+    }),
+  });
+  const page = await mod.browse({ page: "artists" });
+  assert.deepEqual(page.sections[0].artists.map((artist) => artist.id), ["ar-1", "ar-2"]);
+  const similar = page.sections.find((section) => section.title === "Artists You May Like");
+  assert.deepEqual(similar.artists.map((artist) => artist.id), ["ar-3", "ar-4"],
+    "no pick is repeated, no artist twice");
 });
 
 test("an empty artists page says so", async () => {

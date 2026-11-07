@@ -847,32 +847,83 @@ function toCalendarEntry(wire = {}) {
   };
   const id = calendarID(entry, song);
   rememberStory(id, story);
-  return { id, ...story };
+  // song is for the page to ask about; it is not part of the card it hands
+  // the app.
+  return { id, ...story, song };
+}
+
+const calendarTracks = new Map();
+
+function rememberTrack(raw, track) {
+  calendarTracks.set(String(raw), track);
+  // The calendar is read page by page; one session's worth is plenty.
+  if (calendarTracks.size > 600) calendarTracks.delete(calendarTracks.keys().next().value);
 }
 
 async function calendarSong(raw, until) {
+  const key = String(raw);
+  const cached = calendarTracks.get(key);
+  if (cached) return cached;
   // A song Bodian has taken down answers no info, or says so outright.
   const info = await get("service/music/info", { musicId: raw }, { deadline: until });
   if (!info || !info.id) throw fail("unavailable", t("Bodian Music can’t play this song"));
-  return toTrack(info);
+  const track = toTrack(info);
+  rememberTrack(key, track);
+  return track;
+}
+
+// What a calendar card says under its story: the song and who sings it.
+function calendarLine(track) {
+  const artist = (track.artists || []).map((a) => a.name).filter(Boolean).join(", ");
+  return artist ? `${track.name} · ${artist}` : track.name || "";
 }
 
 async function calendarPage(page) {
   const pn = Math.max(1, Number(page) || 1);
-  const data = await get("service/musicCalendar/list/history", { pn, rn: CALENDAR_PAGE });
+  const until = deadline();
+  const data = await get("service/musicCalendar/list/history", { pn, rn: CALENDAR_PAGE }, { deadline: until });
   const list = Array.isArray(data.list) ? data.list : [];
   // A day without a song has nothing to open.
-  const playlists = list.map(toCalendarEntry).filter(Boolean);
+  const entries = list.map(toCalendarEntry).filter(Boolean);
   saveStories();
+  // The story alone says little, so the card also names the song it is about.
+  const playlists = await Promise.all(entries.map(async ({ song, ...card }) => {
+    try {
+      return { ...card, owner: calendarLine(await calendarSong(song, until)) };
+    } catch (error) {
+      // The card still opens, to say the song can't be played.
+      return card;
+    }
+  }));
   return { playlists, pn, more: list.length >= CALENDAR_PAGE };
 }
 
 // 歌手: the artists Bodian picks for its discovery page.
-async function pickedArtists() {
-  const data = await get("service/finds/module", { moduleId: 54, categoryId: 1 });
+async function pickedArtists(until) {
+  const data = await get("service/finds/module", { moduleId: 54, categoryId: 1 }, { deadline: until });
   return (data.artistList || [])
     .filter((wire) => wire && wire.id && wire.name)
     .map(toArtist);
+}
+
+// What listeners of the picks also listen to: enough artists to fill a page
+// where the ten picks alone leave it looking bare.
+async function similarPicks(picks, until) {
+  const seen = new Set(picks.map((artist) => artist.id));
+  const lists = await Promise.all(picks.map((artist) =>
+    get(`service/artist/similar/${String(artist.id).replace(/^ar-/, "")}`, undefined, { deadline: until })
+      .catch(() => ({ resultList: [] }))));
+  const out = [];
+  for (const data of lists) {
+    for (const wire of data.resultList || []) {
+      if (!wire || !wire.id || !wire.name) continue;
+      const artist = toArtist(wire);
+      if (seen.has(artist.id)) continue;
+      seen.add(artist.id);
+      out.push(artist);
+    }
+  }
+  return out;
 }
 
 async function squarePage(page) {
@@ -955,11 +1006,15 @@ export async function browse({ page }) {
     return { title: t("Music Calendar"), subtitle: t("A song and a story for every day"), sections };
   }
   if (page === "artists") {
-    const artists = await pickedArtists();
+    const until = deadline();
+    const picks = await pickedArtists(until);
+    const similar = await similarPicks(picks, until);
+    const sections = [{ artists: picks, empty: t("No artists to show yet") }];
+    if (similar.length) sections.push({ title: t("Artists You May Like"), artists: similar });
     return {
       title: t("Artists"),
       subtitle: t("Bodian Music’s picks for you"),
-      sections: [{ artists, empty: t("No artists to show yet") }],
+      sections,
     };
   }
   if (page === "me") {
