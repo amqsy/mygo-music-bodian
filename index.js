@@ -769,7 +769,10 @@ export async function browse({ page }) {
 
 async function myPlaylists(uid) {
   const data = await get("service/playlist/userCreate", { userId: uid });
-  const mine = (data.playLists || []).map(toPlaylist).map((p) => ({ ...p, mine: true }));
+  // This list has no sourceType, and its playlists are the listener's own.
+  const mine = (data.playLists || [])
+    .map((p) => toPlaylist({ ...p, sourceType: SOURCE_OWN }))
+    .map((p) => ({ ...p, mine: true }));
   const saved = [];
   try {
     const collected = await get("service/collect/4/list", { userId: uid, pn: 1, rn: 100 });
@@ -792,7 +795,8 @@ export async function playlists() {
 async function playlistSource(raw, source) {
   const path = `service/playlist/info/${raw}`;
   const tried = [];
-  for (const st of [source, SOURCE_OTHERS, SOURCE_LIKED, SOURCE_OWN]) {
+  // Other sources answer hollow entries; try the listener's own list first.
+  for (const st of [source, SOURCE_OWN, SOURCE_OTHERS, SOURCE_LIKED]) {
     if (!st || tried.includes(st)) continue;
     tried.push(st);
     let info;

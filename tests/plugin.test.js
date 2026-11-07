@@ -75,11 +75,17 @@ test("a playlist of an unknown source is found by asking the sources", async () 
   const { mod } = await loadPlugin({
     handler: api({
       "service/playlist/info/9": (url) => {
-        // Bodian answers an empty playlist for a source it is not in.
-        if (url.searchParams.get("source") !== "5") return ok({ id: 0, name: "" });
+        const source = url.searchParams.get("source");
+        // Sources the playlist isn't in answer a hollow entry.
+        if (source === "4") return ok({ id: 9, name: "" });
+        if (source === "13") return ok({ id: 9, name: "测试歌单", musicCount: 0 });
+        if (source !== "5") return ok({ id: 0, name: "" });
         return ok(playlistInfo());
       },
-      "service/playlist/9/musicList": ok({ total: 1, list: [track()] }),
+      "service/playlist/9/musicList": (url) =>
+        url.searchParams.get("source") === "5"
+          ? ok({ total: 1, list: [track()] })
+          : ok({ total: 0, list: [] }),
     }),
   });
   const playlist = await mod.playlist({ id: "pl-0-9" });
@@ -88,6 +94,39 @@ test("a playlist of an unknown source is found by asking the sources", async () 
   assert.equal(playlist.mine, true);
   assert.equal(playlist.tracks.length, 1);
   assert.equal(playlist.tracks[0].name, "晴天");
+});
+
+test("my playlists are marked as the listener's own", async () => {
+  const { mod } = await loadPlugin({
+    storage: { session },
+    handler: api({
+      // userCreate answers no sourceType, unlike the playlist square.
+      "service/playlist/userCreate": ok({
+        playLists: [{ id: 9, name: "测试歌单", creatorName: "我", musicCount: 2 }],
+      }),
+      "service/collect/4/list": ok({ playLists: [] }),
+      "service/playlist/info/9": (url) => {
+        const source = url.searchParams.get("source");
+        if (source === "4") return ok({ id: 9, name: "" });
+        if (source === "13") return ok({ id: 9, name: "测试歌单", musicCount: 0 });
+        return ok(playlistInfo());
+      },
+      "service/playlist/9/musicList": (url) =>
+        url.searchParams.get("source") === "5"
+          ? ok({ total: 2, list: [track(), track({ id: 228909, name: "七里香" })] })
+          : ok({ total: 0, list: [] }),
+    }),
+  });
+  const [playlist] = await mod.playlists();
+  assert.equal(playlist.id, "pl-5-9");
+  assert.equal(playlist.trackCount, 2);
+  assert.equal(playlist.mine, true);
+
+  const opened = await mod.playlist({ id: playlist.id });
+  assert.equal(opened.id, "pl-5-9");
+  assert.equal(opened.trackCount, 2);
+  assert.equal(opened.tracks.length, 2);
+  assert.equal(opened.tracks[1].name, "七里香");
 });
 
 test("a chart opens by its own id", async () => {
