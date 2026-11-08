@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 
 import { api, loadPlugin, ok, track } from "./harness.js";
 
+const session = { uid: "68813768", token: "TOKEN" };
+
 const playlist = (over = {}) => ({
   id: 5,
   name: "自驾兜风",
@@ -333,4 +335,113 @@ test("an empty calendar page has nothing to page to", async () => {
   assert.equal(page.sections[0].empty, "");
   const more = page.sections.find((section) => section.title === "More");
   assert.ok(more.links.some((link) => link.page === "calendar-2"), "the way back is kept");
+});
+
+test("what plays is kept as a recent list, once each, newest first", async () => {
+  const { mod, storage } = await loadPlugin({ handler: api({}) });
+  mod.played({ id: "228908" });
+  mod.played({ id: 333 });
+  mod.played({ id: "228908" });
+  mod.played({ id: "not-a-song" });
+  mod.played({});
+  assert.deepEqual(storage.get("recent"), ["228908", "333"]);
+});
+
+test("the recent list keeps its newest hundred", async () => {
+  const old = Array.from({ length: 100 }, (_, i) => String(i + 1));
+  const { mod, storage } = await loadPlugin({ storage: { recent: old }, handler: api({}) });
+  mod.played({ id: "999" });
+  const ids = storage.get("recent");
+  assert.equal(ids.length, 100);
+  assert.equal(ids[0], "999");
+  assert.equal(ids.at(-1), "99", "the oldest is dropped");
+});
+
+test("the recent page asks for each song it kept", async () => {
+  const { mod, calls } = await loadPlugin({
+    storage: { recent: ["228908", "111", "333"] },
+    handler: api({
+      "service/music/info": (url) => {
+        const id = Number(url.searchParams.get("musicId"));
+        if (id === 111) return ok({});
+        return ok(track({ id, name: `歌 ${id}` }));
+      },
+    }),
+  });
+  const page = await mod.browse({ page: "recent" });
+  assert.equal(page.title, "Recently Played");
+  assert.deepEqual(
+    page.sections[0].tracks.map((song) => song.id),
+    ["228908", "333"],
+    "the newest first, and a song with no info is left off",
+  );
+  assert.equal(calls.length, 3, "each kept song is asked for once");
+});
+
+test("an empty recent page says nothing has played", async () => {
+  const { mod } = await loadPlugin({ handler: api({}) });
+  const page = await mod.browse({ page: "recent" });
+  assert.deepEqual(page.sections[0].tracks, []);
+  assert.equal(page.sections[0].empty, "Nothing played yet");
+});
+
+test("home shows what played recently and the way to the rest", async () => {
+  const { mod } = await loadPlugin({
+    storage: { recent: ["228908", "333"] },
+    handler: api({
+      "service/music/info": (url) => ok(track({ id: Number(url.searchParams.get("musicId")) })),
+    }),
+  });
+  const page = await mod.home();
+  const section = page.sections.find((each) => each.title === "Recently Played");
+  assert.ok(section, "the recent section is missing");
+  assert.equal(section.morePage, "recent");
+  assert.deepEqual(section.tracks.map((song) => song.id), ["228908", "333"]);
+});
+
+test("listening stats count what was played and what is played most", async () => {
+  const { mod, calls } = await loadPlugin({
+    storage: { session },
+    handler: api({
+      "ucenter/playdata/user_data": ok({ playcnt: 30, playTime: 3987 }),
+      "ucenter/playdata/play_ranking": ok({ musicList: [track({ id: 111, name: "搁浅" })] }),
+      "play/month/report/summary": ok({
+        monthReport: { monthDesc: "8月听歌", listenTotal: 61, listenChain: "比上月疯狂暴涨" },
+        weekReport: { id: 228908, name: "搁浅", artist: "周杰伦" },
+      }),
+      "service/music/info": ok(track({ id: 228908, name: "搁浅" })),
+    }),
+  });
+  const page = await mod.browse({ page: "stats" });
+  assert.equal(page.title, "Listening Stats");
+  assert.equal(page.description, [
+    "Listened to 30 songs · 1 h 6 min",
+    "8月听歌 · 61 songs · 比上月疯狂暴涨",
+    "This week: 搁浅 · 周杰伦",
+  ].join("\n"));
+  assert.deepEqual(page.sections.map((section) => section.title), ["Most Played", "This Week"]);
+  assert.equal(page.sections[0].tracks[0].name, "搁浅");
+  assert.equal(page.sections[1].tracks[0].id, "228908");
+  const asked = calls.find((call) => call.url.pathname.endsWith("/ucenter/playdata/user_data"));
+  assert.equal(asked.url.searchParams.get("userId"), "68813768");
+  assert.equal(asked.headers.uid, "68813768");
+});
+
+test("a listener without stats sees that there are none", async () => {
+  const { mod } = await loadPlugin({
+    storage: { session },
+    handler: api({
+      "ucenter/playdata/user_data": ok({ playcnt: 0, playTime: 0 }),
+      "ucenter/playdata/play_ranking": ok({ musicList: [] }),
+    }),
+  });
+  // The month report is a bonus: without it the page still answers.
+  const page = await mod.browse({ page: "stats" });
+  assert.equal(page.description, "Listened to 0 songs · 0 min");
+  assert.equal(page.sections[0].empty, "No stats yet");
+});
+
+test("stats need a signed-in listener", async () => {
+  const { mod } = await loadPlugin({ handler: api({}) });
+  await assert.rejects(() => mod.browse({ page: "stats" }), /Sign in to Bodian Music first/);
 });

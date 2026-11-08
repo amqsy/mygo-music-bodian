@@ -573,3 +573,63 @@ test("a signed-in home doesn't ask for a sign-in", async () => {
   const page = await mod.home();
   assert.equal(page.subtitle, "Bodian Music");
 });
+
+test("a comment is published as the Android app does", async () => {
+  const { mod, calls } = await loadPlugin({
+    storage: { session },
+    handler: api({
+      "comments/v3/publish": ok({
+        comment_info: {
+          id: 31981077,
+          content: "好听",
+          userInfo: { nickname: "我", headImg: "http://img.example/me.jpg" },
+          publishTime: "2026-11-08 12:00:00",
+          likeCount: 0,
+          like: 0,
+        },
+      }),
+    }),
+  });
+  const comment = await mod.postComment({ trackId: "228908", text: " 好听 " });
+  assert.equal(comment.id, "31981077");
+  assert.equal(comment.author, "我");
+  assert.equal(comment.avatarUrl, "http://img.example/me.jpg");
+  assert.equal(comment.text, "好听");
+  assert.ok(comment.time > 0);
+  assert.equal(comment.liked, false);
+  const call = calls[0];
+  assert.equal(call.method, "POST");
+  assert.equal(call.headers.plat, "android");
+  assert.equal(call.url.searchParams.get("uid"), "68813768");
+  assert.deepEqual(JSON.parse(call.body), { moduleType: 2, moduleId: 228908, content: "好听" });
+});
+
+test("an empty comment is not sent", async () => {
+  const { mod, calls } = await loadPlugin({ storage: { session }, handler: api({}) });
+  await assert.rejects(
+    () => mod.postComment({ trackId: "228908", text: "   " }),
+    /A comment needs some text/,
+  );
+  assert.equal(calls.length, 0);
+});
+
+test("a comment needs a signed-in listener", async () => {
+  const { mod, calls } = await loadPlugin({ handler: api({}) });
+  await assert.rejects(
+    () => mod.postComment({ trackId: "228908", text: "好听" }),
+    /Sign in to Bodian Music first/,
+  );
+  assert.equal(calls.length, 0);
+});
+
+test("a published comment without its body is echoed back", async () => {
+  const { mod } = await loadPlugin({
+    storage: { session },
+    handler: api({ "comments/v3/publish": ok({}) }),
+  });
+  const before = Date.now();
+  const comment = await mod.postComment({ trackId: "228908", text: "好听" });
+  assert.match(comment.id, /^local-\d+$/);
+  assert.equal(comment.text, "好听");
+  assert.ok(comment.time >= before);
+});

@@ -14,6 +14,8 @@ const REQUEST_TIMEOUT = 8000;
 const CALL_BUDGET = 25000;
 const SESSION_KEY = "session";
 const DEVID_KEY = "devid";
+const RECENT_KEY = "recent";
+const RECENT_LIMIT = 100;
 
 // Which of Bodian's list sources a playlist is in.
 const SOURCE_OTHERS = 4; // playlists listeners made public
@@ -307,7 +309,7 @@ function toComment(wire = {}) {
     text: wire.content || "",
     time: commentTime(wire.publishTime || wire.createTime),
     likes: Number(wire.likeCount) || 0,
-    liked: Number(wire.like) !== 0,
+    liked: Number(wire.like) > 0,
   };
 }
 
@@ -662,13 +664,14 @@ async function homeSections() {
     session() ? settle(module(10), null) : { value: null },
     settle(featuredPlaylists(24), []),
     settle(charts(), []),
+    settle(recentTracks(8, deadline()), []),
   ]);
   // A section that failed leaves the rest standing, but a session that ran
   // out is the listener's to answer, not the page's to swallow.
   const failed = parts.filter((part) => part.error);
   const signedOut = failed.find((part) => part.error && part.error.code === "signIn");
   if (signedOut) throw signedOut.error;
-  const [daily, guess, lab, video, themes, similar, featured, chartList] =
+  const [daily, guess, lab, video, themes, similar, featured, chartList, recent] =
     parts.map((part) => (part.error ? part.fallback : part.value));
 
   if (daily.length) {
@@ -686,6 +689,9 @@ async function homeSections() {
       subtitle: t("Bodian Music picks, one after another"),
       tracks: guess,
     });
+  }
+  if (recent.length) {
+    sections.push({ title: t("Recently Played"), tracks: recent, morePage: "recent" });
   }
   const labMusic = lab && lab.lab && lab.lab.music;
   if (labMusic && labMusic.id) {
@@ -850,23 +856,24 @@ function toCalendarEntry(wire = {}) {
   return { id, ...story, song };
 }
 
-const calendarTracks = new Map();
+// A song's info rarely changes; the calendar, the recent list and the stats
+// page ask for it by id, and opening one of those cards shouldn't ask again.
+const songCache = new Map();
 
-function rememberTrack(raw, track) {
-  calendarTracks.set(String(raw), track);
-  // The calendar is read page by page; one session's worth is plenty.
-  if (calendarTracks.size > 600) calendarTracks.delete(calendarTracks.keys().next().value);
+function rememberSong(raw, track) {
+  songCache.set(String(raw), track);
+  if (songCache.size > 600) songCache.delete(songCache.keys().next().value);
 }
 
-async function calendarSong(raw, until) {
+async function songByID(raw, until) {
   const key = String(raw);
-  const cached = calendarTracks.get(key);
+  const cached = songCache.get(key);
   if (cached) return cached;
   // A song Bodian has taken down answers no info, or says so outright.
   const info = await get("service/music/info", { musicId: raw }, { deadline: until });
   if (!info || !info.id) throw fail("unavailable", t("Bodian Music can’t play this song"));
   const track = toTrack(info);
-  rememberTrack(key, track);
+  rememberSong(key, track);
   return track;
 }
 
@@ -911,7 +918,7 @@ async function calendarPage(page) {
   // The story alone says little, so the card also names the song it is about.
   const playlists = await Promise.all(entries.map(async ({ song, ...card }) => {
     try {
-      return { ...card, owner: calendarLine(await calendarSong(song, until)) };
+      return { ...card, owner: calendarLine(await songByID(song, until)) };
     } catch (error) {
       // The card still opens, to say the song can't be played.
       return card;
@@ -919,6 +926,87 @@ async function calendarPage(page) {
   }));
   return { playlists, pn, more: list.length >= CALENDAR_PAGE };
 }
+
+// --- recent ---------------------------------------------------------------
+
+// The host tells the plugin what plays, and the plugin keeps the list itself:
+// Bodian has no recent-songs endpoint, and the app keeps this on the device.
+function recentIDs() {
+  const saved = host.storage.get(RECENT_KEY);
+  if (!Array.isArray(saved)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const entry of saved) {
+    const id = String(entry && typeof entry === "object" ? entry.id : entry || "");
+    if (!/^\d+$/.test(id) || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
+export function played({ id } = {}) {
+  const raw = String(id || "").trim();
+  if (!/^\d+$/.test(raw) || Number(raw) <= 0) return;
+  const list = recentIDs().filter((each) => each !== raw);
+  list.unshift(raw);
+  host.storage.set(RECENT_KEY, list.slice(0, RECENT_LIMIT));
+}
+
+async function recentTracks(limit, until) {
+  const ids = recentIDs().slice(0, Math.max(0, Number(limit) || 0));
+  const tracks = await Promise.all(ids.map((id) => songByID(id, until).catch(() => null)));
+  return tracks.filter(Boolean);
+}
+
+// --- listening stats -------------------------------------------------------
+
+function listenedLine(count, seconds) {
+  const total = Math.max(0, Math.round(Number(seconds) || 0));
+  let hours = Math.floor(total / 3600);
+  let minutes = Math.round((total % 3600) / 60);
+  if (minutes === 60) {
+    hours += 1;
+    minutes = 0;
+  }
+  return hours
+    ? t("Listened to {count} songs · {hours} h {minutes} min", { count, hours, minutes })
+    : t("Listened to {count} songs · {minutes} min", { count, minutes });
+}
+
+async function statsPage() {
+  const s = await requireSession();
+  const until = deadline();
+  const [data, ranking, report] = await Promise.all([
+    get("ucenter/playdata/user_data", { userId: s.uid }, { deadline: until }),
+    get("ucenter/playdata/play_ranking", { userId: s.uid }, { deadline: until }),
+    get("play/month/report/summary", undefined, { deadline: until }).catch(() => null),
+  ]);
+  const lines = [listenedLine(Number(data.playcnt) || 0, Number(data.playTime) || 0)];
+  const month = report && report.monthReport;
+  if (month && (month.monthDesc || month.listenTotal)) {
+    lines.push([
+      month.monthDesc || "",
+      month.listenTotal ? t("{count} songs", { count: month.listenTotal }) : "",
+      month.listenChain || "",
+    ].filter(Boolean).join(" · "));
+  }
+  const week = report && report.weekReport;
+  if (week && week.name) {
+    lines.push(t("This week: {song} · {artist}", { song: week.name, artist: week.artist || "" }));
+  }
+  const sections = [];
+  const top = (ranking.musicList || []).map(toTrack);
+  if (top.length) sections.push({ title: t("Most Played"), tracks: top });
+  if (week && week.id) {
+    const track = await songByID(String(week.id), until).catch(() => null);
+    if (track) sections.push({ title: t("This Week"), tracks: [track] });
+  }
+  if (!sections.length) sections.push({ tracks: [], empty: t("No stats yet") });
+  return { title: t("Listening Stats"), description: lines.join("\n"), sections };
+}
+
+// --- home and browse -------------------------------------------------------
 
 async function squarePage(page) {
   const pn = Math.max(1, Number(page) || 1);
@@ -999,6 +1087,11 @@ export async function browse({ page }) {
     if (links.length) sections.push({ title: t("More"), links });
     return { title: t("Music Calendar"), subtitle: t("A song and a story for every day"), sections };
   }
+  if (page === "recent") {
+    const tracks = await recentTracks(RECENT_LIMIT, deadline());
+    return { title: t("Recently Played"), sections: [{ tracks, empty: t("Nothing played yet") }] };
+  }
+  if (page === "stats") return statsPage();
   if (page === "me") {
     const s = await requireSession();
     const until = deadline();
@@ -1123,7 +1216,7 @@ export async function playlist({ id }) {
   const until = deadline();
   if (/^cal-\d+-\d+$/.test(String(id))) {
     const [, entry, song] = /^cal-(\d+)-(\d+)$/.exec(String(id));
-    const track = await calendarSong(song, until);
+    const track = await songByID(song, until);
     const related = await calendarRelated(song, until);
     const story = calendarStoriesOf()[calendarID(entry, song)];
     return {
@@ -1453,6 +1546,26 @@ export async function likeComment({ trackId, commentId, on }) {
     commentId: Number(commentId),
     op: on ? 1 : 2,
   }, { headers: COMMENT_HEADERS });
+}
+
+export async function postComment({ trackId, text }) {
+  await requireSession();
+  const raw = digits(trackId);
+  const body = String(text || "").trim();
+  if (!body) throw fail("unavailable", t("A comment needs some text"));
+  const data = await post("comments/v3/publish", {
+    moduleType: 2,
+    moduleId: Number(raw),
+    content: body,
+  }, { headers: COMMENT_HEADERS });
+  const wire = (data && (data.comment_info || data.comment)) || {};
+  const comment = toComment(wire);
+  return {
+    ...comment,
+    id: comment.id || `local-${Date.now()}`,
+    text: comment.text || body,
+    time: comment.time || Date.now(),
+  };
 }
 
 export async function lyrics({ id }) {
