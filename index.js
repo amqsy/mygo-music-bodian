@@ -689,11 +689,9 @@ async function homeSections() {
   }
   const labMusic = lab && lab.lab && lab.lab.music;
   if (labMusic && labMusic.id) {
-    const calendar = (lab.lab && lab.lab.calendar) || {};
-    sections.push({
-      title: calendar.title ? t("Bodian Lab · {title}", { title: calendar.title }) : t("Bodian Lab"),
-      tracks: [toTrack(labMusic)],
-    });
+    // The lab's own name, not the calendar story: its song is the lab's pick,
+    // while the story has its own page and song.
+    sections.push({ title: t("Bodian Lab"), tracks: [toTrack(labMusic)] });
   }
   if (video && Array.isArray(video.video) && video.video.length) {
     sections.push({ title: t("Something Different"), tracks: video.video.map(toTrack) });
