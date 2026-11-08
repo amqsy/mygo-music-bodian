@@ -441,6 +441,23 @@ test("a listener without stats sees that there are none", async () => {
   assert.equal(page.sections[0].empty, "No stats yet");
 });
 
+test("the stats page also shows what played recently, with the way to all of it", async () => {
+  const { mod } = await loadPlugin({
+    storage: { session, recent: ["228908", "333"] },
+    handler: api({
+      "ucenter/playdata/user_data": ok({ playcnt: 1, playTime: 60 }),
+      "ucenter/playdata/play_ranking": ok({ musicList: [] }),
+      "service/music/info": (url) => ok(track({ id: Number(url.searchParams.get("musicId")) })),
+    }),
+  });
+  const page = await mod.browse({ page: "stats" });
+  const section = page.sections.at(-1);
+  assert.equal(section.title, "Recently Played");
+  assert.equal(section.morePage, "recent");
+  assert.deepEqual(section.tracks.map((song) => song.id), ["228908", "333"]);
+  assert.ok(!page.sections.some((each) => each.empty), "a page with recent plays is not empty");
+});
+
 test("stats need a signed-in listener", async () => {
   const { mod } = await loadPlugin({ handler: api({}) });
   await assert.rejects(() => mod.browse({ page: "stats" }), /Sign in to Bodian Music first/);

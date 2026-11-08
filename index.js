@@ -977,10 +977,11 @@ function listenedLine(count, seconds) {
 async function statsPage() {
   const s = await requireSession();
   const until = deadline();
-  const [data, ranking, report] = await Promise.all([
+  const [data, ranking, report, recent] = await Promise.all([
     get("ucenter/playdata/user_data", { userId: s.uid }, { deadline: until }),
     get("ucenter/playdata/play_ranking", { userId: s.uid }, { deadline: until }),
     get("play/month/report/summary", undefined, { deadline: until }).catch(() => null),
+    recentTracks(20, until),
   ]);
   const lines = [listenedLine(Number(data.playcnt) || 0, Number(data.playTime) || 0)];
   const month = report && report.monthReport;
@@ -1001,6 +1002,9 @@ async function statsPage() {
   if (week && week.id) {
     const track = await songByID(String(week.id), until).catch(() => null);
     if (track) sections.push({ title: t("This Week"), tracks: [track] });
+  }
+  if (recent.length) {
+    sections.push({ title: t("Recently Played"), tracks: recent, morePage: "recent" });
   }
   if (!sections.length) sections.push({ tracks: [], empty: t("No stats yet") });
   return { title: t("Listening Stats"), description: lines.join("\n"), sections };
