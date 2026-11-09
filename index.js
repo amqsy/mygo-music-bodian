@@ -54,6 +54,15 @@ function safeURL(value) {
   return /^https?:\/\//i.test(url) ? url : "";
 }
 
+// coverURL asks for the JPEG of a cover Bodian gives as WebP. The system
+// media controls take a cover's bytes as they come, without decoding a
+// WebP, so a song played from radio, the home page or a chart showed no
+// cover there, while search's JPEG did. Bodian's image server serves the
+// same picture as JPEG under the same name.
+function coverURL(value) {
+  return safeURL(value).replace(/\.webp(?=$|[?#])/i, ".jpg");
+}
+
 // t is what the app says in the listener's language: the plugin writes
 // English, and locales/zh-CN.json says it in Chinese.
 function t(text, values) {
@@ -67,18 +76,38 @@ function t(text, values) {
 
 // --- storage ---------------------------------------------------------------
 
+function randomDevid() {
+  const bytes = new Uint8Array(16);
+  if (typeof crypto !== "undefined" && crypto.getRandomValues) crypto.getRandomValues(bytes);
+  else for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// storedDevid is a device ID Bodian knows this install by, made on first use.
+function storedDevid(key) {
+  let id = host.storage.get(key);
+  if (!id) {
+    id = randomDevid();
+    host.storage.set(key, id);
+  }
+  return id;
+}
+
 // devid is this install's device ID: Bodian trusts a device it has seen
 // before, and a token is only good on the device it was issued to.
 function devid() {
-  let id = host.storage.get(DEVID_KEY);
-  if (!id) {
-    const bytes = new Uint8Array(16);
-    if (typeof crypto !== "undefined" && crypto.getRandomValues) crypto.getRandomValues(bytes);
-    else for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
-    id = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-    host.storage.set(DEVID_KEY, id);
-  }
-  return id;
+  return storedDevid(DEVID_KEY);
+}
+
+// freshDevid is a device Bodian has not tied to the listener. It ties a
+// device to an account once that one signs in, and gives a scene a finite
+// list per device: 睡前 listed its songs, then nothing, and this install's
+// own device had nothing left. A device made for this run lists it afresh,
+// while the request still carries the listener's session.
+let freshDeviceId = "";
+function freshDevid() {
+  if (!freshDeviceId) freshDeviceId = randomDevid();
+  return freshDeviceId;
 }
 
 function session() {
@@ -98,7 +127,8 @@ async function requireSession() {
 
 // --- requests --------------------------------------------------------------
 
-function headers(extra) {
+function headers(extra, freshDevice, deviceId) {
+  const device = deviceId || (freshDevice ? freshDevid() : devid());
   const h = {
     "User-Agent": UA,
     plat: "win",
@@ -108,8 +138,8 @@ function headers(extra) {
     "api-ver": "application/json",
     brand: "Windows",
     net: "wifi",
-    devid: devid(),
-    qimei36: devid(),
+    devid: device,
+    qimei36: device,
     ...extra,
   };
   const s = session();
@@ -120,7 +150,7 @@ function headers(extra) {
   return h;
 }
 
-async function request(path, { query, method = "GET", body, headers: extra, deadline: until } = {}) {
+async function request(path, { query, method = "GET", body, headers: extra, deadline: until, freshDevice = false, sessionInQuery = true, device } = {}) {
   if (expired(until)) throw timedOut();
   let url = API + path;
   const q = new URLSearchParams();
@@ -128,15 +158,17 @@ async function request(path, { query, method = "GET", body, headers: extra, dead
     if (v !== undefined && v !== null) q.set(k, String(v));
   }
   // Bodian's writes, and some of its reads, take the session in the query
-  // as well as the headers.
-  const s = session();
+  // as well as the headers. A read from a fresh device sends it in the
+  // headers only: a query uid makes it answer with the account's own picks,
+  // which can be empty, where the headers alone give the scene's songs.
+  const s = sessionInQuery && !freshDevice ? session() : null;
   if (s) {
     q.set("uid", String(s.uid));
     q.set("token", s.token);
   }
   const text = q.toString();
   if (text) url += `?${text}`;
-  const init = { method, headers: headers(extra) };
+  const init = { method, headers: headers(extra, freshDevice, device) };
   if (body !== undefined) {
     init.method = method === "GET" ? "POST" : method;
     init.body = JSON.stringify(body);
@@ -250,7 +282,7 @@ function toAlbum(wire = {}) {
   return {
     id: id ? albumID(id) : "",
     name: wire.album || wire.name || "",
-    imageUrl: safeURL(wire.albumPic || wire.pic),
+    imageUrl: coverURL(wire.albumPic || wire.pic),
     artists,
     released: /^\d{4}-\d{2}-\d{2}$/.test(String(wire.showtime || "")) ? wire.showtime : "",
   };
@@ -565,21 +597,96 @@ function sceneFallback() {
   ];
 }
 
+// sceneCover is a picture for a scene the hub gives none for: the cover of
+// the first song it lists. It asks as a device Bodian has not seen, so the
+// station's own device keeps its songs.
+async function sceneCover(scene, until) {
+  try {
+    const data = await get(`service/category/${scene}/musics`, { pn: 1, rn: 1 }, {
+      deadline: until, sessionInQuery: false, device: randomDevid(),
+    });
+    const wire = (data.musicList || [])[0];
+    return wire ? toTrack(wire).album.imageUrl : "";
+  } catch (error) {
+    return "";
+  }
+}
+
 async function scenes() {
+  const out = [];
+  const seen = new Set();
   try {
     const data = await get("service/radio/scene_radio");
-    const list = (data.result || []).filter((scene) => scene && scene.id);
-    if (list.length) return list;
+    for (const scene of data.result || []) {
+      if (!scene || !scene.id || seen.has(String(scene.id))) continue;
+      seen.add(String(scene.id));
+      out.push(scene);
+    }
   } catch (error) {
-    // Signed out, or the hub is away: carry on with the scenes it always had.
+    // Signed out, or the hub is away: the category tree may still name them.
   }
+  // The hub offers four of the scene category's seven; the rest are scenes
+  // of the same kind (夜店, 深夜, 店铺), so they make stations too.
+  try {
+    const tree = await categoryTreeOf();
+    const groups = tree.categories || [];
+    const group = groups.find((g) => (g.subCategories || []).some((sub) => seen.has(String(sub.id))))
+      || groups.find((g) => g.name === "场景");
+    for (const sub of (group && group.subCategories) || []) {
+      if (!sub || !sub.id || seen.has(String(sub.id))) continue;
+      seen.add(String(sub.id));
+      out.push({ id: Number(sub.id), name: sub.name });
+    }
+  } catch (error) {
+    // Without the tree, the hub's own scenes stand.
+  }
+  const bare = out.filter((scene) => !scene.pic);
+  if (bare.length) {
+    const until = deadline();
+    await Promise.all(bare.map(async (scene) => {
+      scene.pic = await sceneCover(scene.id, until);
+    }));
+  }
+  if (out.length) return out;
   return sceneFallback();
 }
 
-// A station is endless here, so each one remembers how far it has read and
-// what it has already played.
+// A station is endless here, so each one remembers how far it has read,
+// what it has already played, and the songs it listed to go on with once
+// Bodian has no more.
 const stationAt = new Map();
 const stationPlayed = new Map();
+const stationSongs = new Map();
+const stationReplay = new Map();
+// The last song a station played, to go on with its kind, and how far the
+// recommendation stream has been read for it.
+const stationSeed = new Map();
+const stationGuessAt = new Map();
+
+// rememberStation keeps a station's songs in the order it listed them.
+function rememberStation(key, tracks) {
+  const all = stationSongs.get(key) || [];
+  const known = new Set(all.map((song) => song.id));
+  for (const track of tracks) {
+    if (known.has(track.id)) continue;
+    known.add(track.id);
+    all.push(track);
+  }
+  stationSongs.set(key, all);
+}
+
+// replayStation answers the next songs of a station Bodian has run out of:
+// its own list again, from where the last replay stopped.
+function replayStation(key) {
+  const all = stationSongs.get(key) || [];
+  if (!all.length) return [];
+  let at = stationReplay.get(key) || 0;
+  const count = Math.min(PAGE, all.length);
+  const out = [];
+  for (let i = 0; i < count; i += 1) out.push(all[(at + i) % all.length]);
+  stationReplay.set(key, (at + count) % all.length);
+  return out;
+}
 
 export async function stations() {
   const out = [
@@ -600,6 +707,19 @@ export async function stations() {
   return out;
 }
 
+// A scene's songs, read like every other list. A device that has already
+// heard a scene gets no more of it (and its account picks can be empty),
+// so when that answers nothing a device made for this run asks again, with
+// the session in the headers only: a query uid asks for those empty picks.
+async function sceneTracks(scene, pn, until) {
+  const path = `service/category/${scene}/musics`;
+  const data = await get(path, { pn, rn: PAGE }, { deadline: until });
+  const list = data.musicList || [];
+  if (list.length || !session()) return list;
+  const fresh = await get(path, { pn, rn: PAGE }, { deadline: until, sessionInQuery: false, freshDevice: true });
+  return fresh.musicList || [];
+}
+
 export async function stationNext({ id }) {
   const key = String(id || "");
   const scene = /^scene-(\d+)$/.exec(key);
@@ -613,20 +733,60 @@ export async function stationNext({ id }) {
   for (let tries = 1; tries <= 3; tries += 1) {
     if (expired(until)) throw timedOut();
     const next = page + tries;
-    const data = key === "guess"
-      ? await get("service/music/recommendList", { pn: next, rn: 30, select_card: 1 }, { deadline: until })
-      : await get(`service/category/${scene[1]}/musics`, { pn: next, rn: PAGE }, { deadline: until });
-    const tracks = (data.musicList || []).map(toTrack).filter((track) => track.id && !seen.has(track.id));
+    const list = key === "guess"
+      ? ((await get("service/music/recommendList", { pn: next, rn: 30, select_card: 1 }, { deadline: until })).musicList || [])
+      : await sceneTracks(scene[1], next, until);
+    const tracks = list.map(toTrack).filter((track) => track.id && !seen.has(track.id));
     if (tracks.length) {
       stationAt.set(key, next);
       for (const track of tracks) seen.add(track.id);
       stationPlayed.set(key, seen);
+      rememberStation(key, tracks);
+      stationSeed.set(key, tracks[tracks.length - 1].id);
       return tracks;
     }
   }
-  stationAt.set(key, page + 3);
+  // Bodian listed all it will for this device: a scene gives its songs and
+  // then nothing, and a device it has not seen gets the same ones. Go on
+  // with songs like the last one, then with the recommendation stream: the
+  // app drops a batch whose songs are already in its queue, so a station
+  // that handed its own list back would stop there.
+  const more = [];
+  const seed = stationSeed.get(key);
+  if (seed) {
+    try {
+      for (const track of await calendarRelated(seed, until)) {
+        if (!track.id || seen.has(track.id)) continue;
+        seen.add(track.id);
+        more.push(track);
+        if (more.length >= PAGE) break;
+      }
+    } catch (error) {
+      // The similar list is an addition; the station can go on without it.
+    }
+  }
+  if (!more.length) {
+    const pn = (stationGuessAt.get(key) || 0) + 1;
+    stationGuessAt.set(key, pn);
+    try {
+      const data = await get("service/music/recommendList", { pn, rn: 30, select_card: 1 }, { deadline: until });
+      for (const track of (data.musicList || []).map(toTrack)) {
+        if (!track.id || seen.has(track.id)) continue;
+        seen.add(track.id);
+        more.push(track);
+      }
+    } catch (error) {
+      // Keep the station's own list if the stream can't answer.
+    }
+  }
+  stationAt.set(key, 0);
   stationPlayed.set(key, seen);
-  return [];
+  if (more.length) {
+    rememberStation(key, more);
+    stationSeed.set(key, more[more.length - 1].id);
+    return more;
+  }
+  return replayStation(key);
 }
 
 // guessTracks is 猜你想听: a recommendation stream that answers a few songs at
@@ -664,14 +824,13 @@ async function homeSections() {
     session() ? settle(module(10), null) : { value: null },
     settle(featuredPlaylists(24), []),
     settle(charts(), []),
-    settle(recentTracks(8, deadline()), []),
   ]);
   // A section that failed leaves the rest standing, but a session that ran
   // out is the listener's to answer, not the page's to swallow.
   const failed = parts.filter((part) => part.error);
   const signedOut = failed.find((part) => part.error && part.error.code === "signIn");
   if (signedOut) throw signedOut.error;
-  const [daily, guess, lab, video, themes, similar, featured, chartList, recent] =
+  const [daily, guess, lab, video, themes, similar, featured, chartList] =
     parts.map((part) => (part.error ? part.fallback : part.value));
 
   if (daily.length) {
@@ -689,9 +848,6 @@ async function homeSections() {
       subtitle: t("Bodian Music picks, one after another"),
       tracks: guess,
     });
-  }
-  if (recent.length) {
-    sections.push({ title: t("Recently Played"), tracks: recent, morePage: "recent" });
   }
   const labMusic = lab && lab.lab && lab.lab.music;
   if (labMusic && labMusic.id) {

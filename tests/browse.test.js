@@ -385,18 +385,21 @@ test("an empty recent page says nothing has played", async () => {
   assert.equal(page.sections[0].empty, "Nothing played yet");
 });
 
-test("home shows what played recently and the way to the rest", async () => {
+test("home leaves recently played to the listening stats page", async () => {
   const { mod } = await loadPlugin({
     storage: { recent: ["228908", "333"] },
     handler: api({
+      "service/home/module": (url) =>
+        url.searchParams.get("moduleId") === "3" ? ok({ musicList: [track()] }) : ok({}),
       "service/music/info": (url) => ok(track({ id: Number(url.searchParams.get("musicId")) })),
     }),
   });
   const page = await mod.home();
-  const section = page.sections.find((each) => each.title === "Recently Played");
-  assert.ok(section, "the recent section is missing");
-  assert.equal(section.morePage, "recent");
-  assert.deepEqual(section.tracks.map((song) => song.id), ["228908", "333"]);
+  assert.ok(page.sections.some((each) => each.title === "Daily Picks"), "Daily Picks is kept on Home");
+  assert.ok(
+    !page.sections.some((each) => each.title === "Recently Played"),
+    "Recently Played belongs to the stats page",
+  );
 });
 
 test("listening stats count what was played and what is played most", async () => {

@@ -1,7 +1,7 @@
 {
   "id": "bodian",
   "name": "Bodian Music",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "minAppVersion": "0.1.17",
   "main": "index.js",
   "playback": "stream",
@@ -17,11 +17,10 @@
   ],
   "navigation": [
     { "title": "Discover", "builtin": "home", "icon": "home" },
-    { "title": "Daily Picks", "page": "daily", "icon": "star" },
-    { "title": "Music Calendar", "page": "calendar", "icon": "calendar" },
     { "title": "Radio", "builtin": "stations", "icon": "radio" },
     { "title": "Charts", "page": "charts", "icon": "chart" },
     { "title": "Playlist Square", "page": "square", "icon": "playlist" },
+    { "title": "Music Calendar", "page": "calendar", "icon": "calendar" },
     { "title": "Topics", "page": "topics", "icon": "podcast" },
     { "title": "Listening Stats", "page": "stats", "icon": "artist" },
     { "title": "Liked Songs", "builtin": "liked", "icon": "heart" }

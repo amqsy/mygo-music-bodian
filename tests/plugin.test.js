@@ -18,6 +18,7 @@ test("search maps a Bodian song to a MyGo track", async () => {
   assert.equal(song.duration, 269000);
   assert.equal(song.album.id, "al-1293");
   assert.equal(song.album.name, "叶惠美");
+  assert.equal(song.album.imageUrl, "http://img.example/cover.jpg");
   assert.equal(song.artists[0].id, "ar-336");
   assert.equal(song.artists[0].name, "周杰伦");
   assert.equal(song.unavailable, false);
@@ -28,6 +29,16 @@ test("search maps a Bodian song to a MyGo track", async () => {
   assert.equal(query.get("pn"), "0");
   assert.equal(query.get("rn"), "30");
   assert.equal(query.get("correct"), "1");
+});
+
+test("a cover Bodian gives as WebP is handed over as JPEG", async () => {
+  const { mod } = await loadPlugin({
+    handler: api({
+      "search/music/list": ok({ resultList: [track({ albumPic: "http://img.example/cover.webp" })] }),
+    }),
+  });
+  const result = await mod.search({ query: "晴天", kind: "tracks" });
+  assert.equal(result.tracks[0].album.imageUrl, "http://img.example/cover.jpg");
 });
 
 test("a song taken down is marked unavailable", async () => {
@@ -463,6 +474,16 @@ test("the manifest's name, pages and settings are translated", async () => {
   ];
   const missing = [...new Set(keys)].filter((key) => !(key in locales));
   assert.deepEqual(missing, []);
+});
+
+test("Daily Picks lives in Home, and the calendar sits before Topics", async () => {
+  const manifest = JSON.parse(await readFile(new URL("../plugin.json", import.meta.url), "utf8"));
+  const titles = manifest.navigation.map((item) => item.title);
+  assert.ok(!titles.includes("Daily Picks"), "Daily Picks is not a sidebar entry");
+  const square = titles.indexOf("Playlist Square");
+  const calendar = titles.indexOf("Music Calendar");
+  const topics = titles.indexOf("Topics");
+  assert.ok(square < calendar && calendar < topics, titles.join(","));
 });
 
 test("each sidebar entry has its own icon", async () => {
