@@ -300,6 +300,37 @@ test("saved playlists are read past the first page, and mark the playlist saved"
   assert.equal(playlist.saved, true);
 });
 
+test("the listener's own playlists open with their songs, not an empty page", async () => {
+  // userCreate answers no sourceType, so these were left as pl-0-, and the
+  // search ended on source 13, which names the playlist and lists no songs.
+  const { mod } = await loadPlugin({
+    storage: { session },
+    handler: api({
+      "service/playlist/userCreate": ok({
+        playLists: [{ id: 88519078, name: "阿白的2024年度音乐歌单", musicCount: 1, creatorId: 68813768 }],
+      }),
+      "service/collect/4/list": ok({ playLists: [] }),
+      "service/playlist/info/88519078": (url) => {
+        const source = url.searchParams.get("source");
+        if (source === "5") return ok({ id: 88519078, name: "阿白的2024年度音乐歌单", creatorId: 68813768, sourceType: 5, musicCount: 1 });
+        if (source === "13") return ok({ id: 88519078, name: "阿白的2024年度音乐歌单", musicCount: 0, sourceType: 13 });
+        return ok({ id: 0, name: "" });
+      },
+      "service/playlist/88519078/musicList": (url) =>
+        url.searchParams.get("source") === "5" ? ok({ total: 1, list: [track()] }) : ok({ total: 0, list: [] }),
+    }),
+  });
+  const lists = await mod.playlists();
+  assert.equal(lists[0].id, "pl-5-88519078");
+  const playlist = await mod.playlist({ id: lists[0].id });
+  assert.equal(playlist.name, "阿白的2024年度音乐歌单");
+  assert.equal(playlist.mine, true);
+  assert.equal(playlist.tracks.length, 1);
+  // An id kept from before, when the library said pl-0-, opens all the same.
+  const old = await mod.playlist({ id: "pl-0-88519078" });
+  assert.equal(old.tracks.length, 1);
+});
+
 test("a playlist from search is not the listener's own", async () => {
   const { mod } = await loadPlugin({
     storage: { session },
