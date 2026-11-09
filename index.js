@@ -1124,7 +1124,10 @@ const savedPlaylistIDs = new Set();
 
 async function myPlaylists(uid, until) {
   const data = await get("service/playlist/userCreate", { userId: uid }, { deadline: until });
-  const mine = (data.playLists || []).map(toPlaylist).map((p) => ({ ...p, mine: true }));
+  // userCreate leaves out sourceType, so toPlaylist alone would make these
+  // pl-0-: a playlist the listener made is one Bodian files under source 5.
+  const mine = (data.playLists || [])
+    .map((wire) => ({ ...toPlaylist(wire), id: plID(SOURCE_OWN, wire.id), mine: true }));
   for (const p of mine) ownPlaylistIDs.add(p.id);
   const saved = [];
   const fresh = new Set();
@@ -1168,7 +1171,11 @@ export async function playlists() {
 async function playlistSource(raw, source, until, order) {
   const path = `service/playlist/info/${raw}`;
   const tried = [];
-  for (const st of [source, ...(order || [SOURCE_OTHERS, SOURCE_LIKED, SOURCE_OWN])]) {
+  // The listener's own lists come before the rest: an id that names none of
+  // them (pl-0-, as a library read before userCreate's source was known left
+  // it) is one of theirs, and source 13 answers such an id with the right name
+  // and no songs, which ends the search with an empty page.
+  for (const st of [source, ...(order || [SOURCE_OWN, SOURCE_OTHERS, SOURCE_LIKED])]) {
     if (!st || tried.includes(st)) continue;
     tried.push(st);
     if (expired(until)) throw timedOut();
