@@ -376,6 +376,57 @@ test("an album says whether the listener saved it", async () => {
   assert.equal(page.tracks.length, 1);
 });
 
+test("an artist lists all of their albums", async () => {
+  const albums = Array.from({ length: 57 }, (_, index) => ({
+    albumId: 1000 + index,
+    album: `专辑 ${index + 1}`,
+    showtime: "2024-01-01",
+  }));
+  const { mod, calls } = await loadPlugin({
+    handler: api({
+      "service/artist/983": ok({ artistInfo: { id: 983, name: "方大同" } }),
+      "service/artist/music/983": ok({ resultList: [track()] }),
+      "service/artist/album/983": ok({ total: albums.length, pn: 1, rn: 1000, resultList: albums }),
+      "service/collect/multipleState": ok({ result: [] }),
+    }),
+  });
+  const page = await mod.artist({ id: "ar-983" });
+  const again = await mod.artist({ id: "ar-983" });
+  assert.equal(page.albums.length, 57);
+  assert.equal(again.albums.length, 57);
+  assert.equal(page.albums[0].id, "al-1000");
+  assert.equal(page.albums.at(-1).id, "al-1056");
+  const songs = calls.find((call) => call.url.pathname.endsWith("/service/artist/music/983"));
+  assert.equal(songs.url.searchParams.get("rn"), "100");
+  const asked = calls.find((call) => call.url.pathname.endsWith("/service/artist/album/983"));
+  assert.equal(asked.url.searchParams.get("rn"), "1000");
+  assert.equal(calls.filter((call) => call.url.pathname.endsWith("/service/artist/983")).length, 2);
+  assert.equal(calls.filter((call) => call.url.pathname.endsWith("/service/artist/music/983")).length, 2);
+  assert.equal(calls.filter((call) => call.url.pathname.endsWith("/service/artist/album/983")).length, 2);
+  assert.equal(calls.filter((call) => call.url.pathname.endsWith("/service/collect/multipleState")).length, 2);
+});
+
+test("an artist with a failed list is asked again", async () => {
+  let albumCalls = 0;
+  const { mod } = await loadPlugin({
+    handler: api({
+      "service/artist/983": ok({ artistInfo: { id: 983, name: "方大同" } }),
+      "service/artist/music/983": ok({ resultList: [track()] }),
+      "service/artist/album/983": () => {
+        albumCalls += 1;
+        return albumCalls === 1
+          ? { code: 500, msg: "temporary", data: {} }
+          : ok({ total: 1, resultList: [{ albumId: 1000, album: "Soulboy" }] });
+      },
+    }),
+  });
+  const first = await mod.artist({ id: "ar-983" });
+  assert.equal(first.albums.length, 0);
+  const second = await mod.artist({ id: "ar-983" });
+  assert.equal(second.albums.length, 1);
+  assert.equal(albumCalls, 2);
+});
+
 test("a chart is a page, not a playlist to save", async () => {
   const { mod } = await loadPlugin({
     handler: api({

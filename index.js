@@ -8,6 +8,8 @@ const API = "https://bd-api.kuwo.cn/api/";
 const LYRIC = "https://mlyric.kuwo.cn/mobi.s";
 const UA = "Dart/3.3 (dart:io)";
 const PAGE = 30;
+const ARTIST_TRACK_LIMIT = 100;
+const ARTIST_ALBUM_LIMIT = 1000;
 const PLAYLIST_LIMIT = 1000;
 const REQUEST_TIMEOUT = 8000;
 // The host gives a call 30 seconds; stop short of it so the answer is ours.
@@ -1666,14 +1668,14 @@ export async function album({ id }) {
 
 export async function artist({ id }) {
   const raw = parsePrefixed(id, "ar");
-  const data = await get(`service/artist/${raw}`);
-  const info = data.artistInfo || {};
-  if (!info.id && !info.name) throw fail("unavailable", t("This artist isn’t available"));
-  const [songs, albums, state] = await Promise.all([
-    get(`service/artist/music/${raw}`, { pn: 1, rn: 50 }).catch(() => ({ resultList: [] })),
-    get(`service/artist/album/${raw}`, { pn: 1, rn: 30 }).catch(() => ({ resultList: [] })),
+  const [data, songs, albums, state] = await Promise.all([
+    get(`service/artist/${raw}`),
+    get(`service/artist/music/${raw}`, { pn: 1, rn: ARTIST_TRACK_LIMIT }).catch(() => ({ resultList: [] })),
+    get(`service/artist/album/${raw}`, { pn: 1, rn: ARTIST_ALBUM_LIMIT }).catch(() => ({ resultList: [] })),
     get("service/collect/multipleState", { source: SOURCE_ARTIST, sourceIds: raw }).catch(() => ({ result: [] })),
   ]);
+  const info = data.artistInfo || {};
+  if (!info.id && !info.name) throw fail("unavailable", t("This artist isn’t available"));
   const followed = (state.result || []).some((r) => String(r.id) === raw && !!r.collect);
   return {
     artist: { ...toArtist(info), following: followed },
